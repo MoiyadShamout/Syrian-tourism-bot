@@ -1,135 +1,110 @@
-import os
-import sqlite3
-import threading
-import time
 import requests
 from bs4 import BeautifulSoup
+import sqlite3
+import os
 from flask import Flask
-from telegram import Bot
+import threading
+import time
 
-# إعداد خادم Flask للحفاظ على تشغيل التطبيق (مناسب لمنصات الاستضافة مثل Render)
 app = Flask(__name__)
 
-
-@app.route("/")
-def home():
-  return "Syrian Tourism & SANA Bot is running successfully!"
-
-
-def run_flask():
-  port = int(os.environ.get("PORT", 5000))
-  app.run(host="0.0.0.0", port=port)
-
-
-# إعدادات بوت تيليجرام (يتم جلبها من متغيرات البيئة أو وضعهما مباشرة)
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN")
-CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID", "@YOUR_CHANNEL")
-bot = Bot(token=TOKEN)
-
-# إعداد قاعدة بيانات SQLite لتخزين روابط الأخبار المرسلة سابقاً لتجنب التكرار
-DB_NAME = "news.db"
-
-
+# إعداد قاعدة البيانات لتخزين الروابط المرسلة وتجنب التكرار
 def init_db():
-  conn = sqlite3.connect(DB_NAME)
-  cursor = conn.cursor()
-  cursor.execute(
-      """CREATE TABLE IF NOT EXISTS sent_news (
-                    url TEXT PRIMARY KEY
-                )"""
-  )
-  conn.commit()
-  conn.close()
+    conn = sqlite3.connect('bot_database.db', check_same_thread=False)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS sent_news (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            url TEXT UNIQUE
+        )
+    ''')
+    conn.commit()
+    conn.close()
 
+init_db()
 
-def is_news_sent(url):
-  conn = sqlite3.connect(DB_NAME)
-  cursor = conn.cursor()
-  cursor.execute("SELECT 1 FROM sent_news WHERE url = ?", (url,))
-  result = cursor.fetchone()
-  conn.close()
-  return result is not None
+def send_telegram_message(text):
+    bot_token = os.environ.get('TELEGRAM_BOT_TOKEN')
+    channel_id = os.environ.get('TELEGRAM_CHANNEL_ID')
+    if bot_token and channel_id:
+        telegram_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        try:
+            requests.post(telegram_url, json={
+                'chat_id': channel_id,
+                'text': text,
+                'parse_mode': 'Markdown'
+            }, timeout=10)
+        except Exception as e:
+            print(f"Telegram error: {e}")
 
+def fetch_and_send_single_news():
+    """جلب خبر واحد فقط كاختبار أو كأحدث خبر مهم"""
+    targets = [
+        "https://sana.sy/",
+        "https://sana.sy/syria-news/"
+    ]
+    
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    
+    for target_url in targets:
+        try:
+            response = requests.get(target_url, headers=headers, timeout=15)
+            if response.status_code != 200:
+                continue
+                
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # البحث عن الروابط والعناوين داخل العناوين الرئيسية
+            for item in soup.find_all(['h2', 'h3', 'h4'], limit=10):
+                a_tag = item.find('a', href=True)
+                if not a_tag and item.name == 'a' and item.get('href'):
+                    a_tag = item
+                
+                if a_tag:
+                    title = a_tag.get_text(strip=True)
+                    link = a_tag['href']
+                    
+                    # فلترة للتأكد أنه خبر حقيقي
+                    if len(title) > 15 and link.startswith('http'):
+                        conn = sqlite3.connect('bot_database.db')
+                        cursor = conn.cursor()
+                        cursor.execute('SELECT id FROM sent_news WHERE url = ?', (link,))
+                        exists = cursor.fetchone()
+                        
+                        if not exists:
+                            # حفظ الرابط لعدم تكراره مستقبلاً
+                            cursor.execute('INSERT INTO sent_news (url) VALUES (?)', (link,))
+                            conn.commit()
+                            conn.close()
+                            
+                            # إرسال الخبر الأول الذي يتم العثور عليه فقط
+                            message = f"📢 **خبر حصري / مهم:**\n\n{title}\n\n🔗 الرابط: {link}"
+                            send_telegram_message(message)
+                            return True  # الخروج بعد إرسال خبر واحد فقط لعدم إحداث أي سيل من الإشعارات
+                        else:
+                            conn.close()
+        except Exception as e:
+            print(f"Error fetching news: {e}")
+    return False
 
-def mark_news_as_sent(url):
-  conn = sqlite3.connect(DB_NAME)
-  cursor = conn.cursor()
-  cursor.execute("INSERT OR IGNORE INTO sent_news (url) VALUES (?)", (url,))
-  conn.commit()
-  conn.close()
+# حلقة خلفية تعمل كل نصف ساعة لفحص وإرسال خبر جديد ومهم فقط
+def background_worker():
+    while True:
+        time.sleep(1800)  # الانتظار لمدة 30 دقيقة (1800 ثانية)
+        fetch_and_send_single_news()
 
+# تشغيل العامل في الخلفية مع الخادم
+thread = threading.Thread(target=background_worker, daemon=True)
+thread.start()
 
-# وظيفة سحب الأخبار من موقع سانا ووزارة السياحة
-def scrape_and_send():
-  # روابط المواقع المستهدفة (يمكنك تعديلها بناءً على الروابط الدقيقة للمصادر)
-  sources = [
-      {
-          "name": "وكالة سانا (SANA)",
-          "url": "http://sana.sy/",  # أو رابط القسم السياحي المخصص
-          "parser": "sana",
-      },
-      {
-          "name": "وزارة السياحة السورية",
-          "url": "http://www.syrourism.sy/",  # رابط موقع الوزارة
-          "parser": "tourism",
-      },
-  ]
+@app.route('/')
+def home():
+    # عند زيارة الرابط (أو طلب UptimeRobot)، سيقوم بإرسال إشعار اختبار واحد فوري إذا لم يُرسل من قبل
+    fetched = fetch_and_send_single_news()
+    if fetched:
+        return "Syrian Tourism & SANA Bot: Test news sent successfully to Telegram!"
+    else:
+        return "Syrian Tourism & SANA Bot is running successfully (No new unread news found)."
 
-  headers = {
-      "User-Agent": (
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-      )
-  }
-
-  for source in sources:
-    try:
-      response = requests.get(
-          source["url"], headers=headers, timeout=15
-      )
-      if response.status_code == 200:
-        soup = BeautifulSoup(response.text, "html.parser")
-
-        # تخصيص آلية البحث حسب هيكلية كل موقع (يمكن تعديل الوسوم بما يتوافق مع النصوص المدخلة سابقاً)
-        # مثال افتراضي لجلب العناوين والروابط:
-        articles = soup.find_all("a", href=True)
-
-        for article in articles[:10]:  # فحص أحدث الروابط
-          title = article.get_text(strip=True)
-          link = article["href"]
-
-          # تصفية الروابط للتأكد من أنها تخص الأخبار وليست روابط عامة
-          if len(title) > 20 and link.startswith("http"):
-            if not is_news_sent(link):
-              message = (
-                  f"📢 **خبر جديد من {source['name']}**\n\n"
-                  f"📌 **{title}**\n\n"
-                  f"🔗 [رابط الخبر]({link})"
-              )
-
-              # إرسال الرسالة إلى قناة تيليجرام
-              # ملاحظة: يتم تشغيلها بشكل متوافق مع الدوال غير المتزامنة أو بالطريقة المباشرة
-              bot.send_message(
-                  chat_id=CHANNEL_ID, text=message, parse_mode="Markdown"
-              )
-
-              mark_news_as_sent(link)
-              time.sleep(2)  # فاصل زمني لتجنب حظر الطلبات
-    except Exception as e:
-      print(f"Error scraping {source['name']}: {e}")
-
-
-def worker_loop():
-  init_db()
-  while True:
-    scrape_and_send()
-    time.sleep(1800)  # الفحص كل نصف ساعة
-
-
-if __name__ == "__main__":
-  # تشغيل خادم Flask في خيط منفصل (Background Thread)
-  flask_thread = threading.Thread(target=run_flask)
-  flask_thread.daemon = True
-  flask_thread.start()
-
-  # بدء حلقة فحص الأخبار وتحديثها
-  worker_loop()
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=10000)
