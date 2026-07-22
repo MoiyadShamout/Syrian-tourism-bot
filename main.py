@@ -25,8 +25,8 @@ def init_db():
 init_db()
 
 def send_telegram_message(text):
-    bot_token = os.environ.get('TELEGRAM_BOT_TOKEN')
-    channel_id = os.environ.get('TELEGRAM_CHANNEL_ID')
+    bot_token = os.environ.get('8603025224:AAGcXyQw8MeTtUShx0e1uBg4AdKm1q7272w')
+    channel_id = os.environ.get('-1004481182341')
     if bot_token and channel_id:
         telegram_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
         try:
