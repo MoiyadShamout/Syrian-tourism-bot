@@ -1,141 +1,135 @@
 import os
-import time
 import sqlite3
-import logging
+import threading
+import time
 import requests
 from bs4 import BeautifulSoup
 from flask import Flask
-from threading import Thread
 from telegram import Bot
 
-# إعداد السجل (Logging)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-# إعداد خريف Flask لضمان استمرار عمل السكربت على Render واستجابة UptimeRobot
+# إعداد خادم Flask للحفاظ على تشغيل التطبيق (مناسب لمنصات الاستضافة مثل Render)
 app = Flask(__name__)
 
-@app.route('/')
+
+@app.route("/")
 def home():
-    return "Syrian Tourism & Official News Bot is running successfully!"
+  return "Syrian Tourism & SANA Bot is running successfully!"
+
 
 def run_flask():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+  port = int(os.environ.get("PORT", 5000))
+  app.run(host="0.0.0.0", port=port)
 
-# إعداد قاعدة البيانات لمنع تكرار نشر الأخبار
-DB_FILE = "published_news.db"
+
+# إعدادات بوت تيليجرام (يتم جلبها من متغيرات البيئة أو وضعهما مباشرة)
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN")
+CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID", "@YOUR_CHANNEL")
+bot = Bot(token=TOKEN)
+
+# إعداد قاعدة بيانات SQLite لتخزين روابط الأخبار المرسلة سابقاً لتجنب التكرار
+DB_NAME = "news.db"
+
 
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS published (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            news_url TEXT UNIQUE
-        )
-    ''')
-    conn.commit()
-    conn.close()
+  conn = sqlite3.connect(DB_NAME)
+  cursor = conn.cursor()
+  cursor.execute(
+      """CREATE TABLE IF NOT EXISTS sent_news (
+                    url TEXT PRIMARY KEY
+                )"""
+  )
+  conn.commit()
+  conn.close()
 
-def is_published(news_url):
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("SELECT 1 FROM published WHERE news_url = ?", (news_url,))
-    result = cursor.fetchone()
-    conn.close()
-    return result is not None
 
-def mark_as_published(news_url):
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR IGNORE INTO published (news_url) VALUES (?)", (news_url,))
-    conn.commit()
-    conn.close()
+def is_news_sent(url):
+  conn = sqlite3.connect(DB_NAME)
+  cursor = conn.cursor()
+  cursor.execute("SELECT 1 FROM sent_news WHERE url = ?", (url,))
+  result = cursor.fetchone()
+  conn.close()
+  return result is not None
 
-# إعداد بوت تليجرام
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-TELEGRAM_CHANNEL = os.environ.get("TELEGRAM_CHANNEL") # مثال: @YourChannel
 
-bot = Bot(token=TELEGRAM_TOKEN) if TELEGRAM_TOKEN else None
+def mark_news_as_sent(url):
+  conn = sqlite3.connect(DB_NAME)
+  cursor = conn.cursor()
+  cursor.execute("INSERT OR IGNORE INTO sent_news (url) VALUES (?)", (url,))
+  conn.commit()
+  conn.close()
 
-# مصادر الأخبار الرسمية (وزارة السياحة وسانا)
-SOURCES = [
-    {
-        "name": "وزارة السياحة السورية",
-        "url": "http://mots.gov.sy/", 
-        "tag": "#وزارة_السياحة"
-    },
-    {
-        "name": "وكالة سانا (قسم السياحة)",
-        "url": "https://sana.sy/?cat=32", 
-        "tag": "#سانا #أخبار_سورية"
-    }
-]
 
-def fetch_and_post_news():
-    if not bot or not TELEGRAM_CHANNEL:
-        logging.error("Telegram Token or Channel is missing in environment variables!")
-        return
+# وظيفة سحب الأخبار من موقع سانا ووزارة السياحة
+def scrape_and_send():
+  # روابط المواقع المستهدفة (يمكنك تعديلها بناءً على الروابط الدقيقة للمصادر)
+  sources = [
+      {
+          "name": "وكالة سانا (SANA)",
+          "url": "http://sana.sy/",  # أو رابط القسم السياحي المخصص
+          "parser": "sana",
+      },
+      {
+          "name": "وزارة السياحة السورية",
+          "url": "http://www.syrourism.sy/",  # رابط موقع الوزارة
+          "parser": "tourism",
+      },
+  ]
 
-    for source in SOURCES:
-        try:
-            headers = {'User-Agent': 'Mozilla/5.0'}
-            response = requests.get(source["url"], headers=headers, timeout=15)
-            if response.status_code != 200:
-                continue
+  headers = {
+      "User-Agent": (
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+      )
+  }
 
-            soup = BeautifulSoup(response.text, 'html.parser')
-            
-            # استخراج الروابط والعناوين (سيتم مطابقتها مع هيكلية المواقع الرسمية)
-            for a_tag in soup.find_all('a', href=True):
-                title = a_tag.get_text(strip=True)
-                link = a_tag['href']
+  for source in sources:
+    try:
+      response = requests.get(
+          source["url"], headers=headers, timeout=15
+      )
+      if response.status_code == 200:
+        soup = BeautifulSoup(response.text, "html.parser")
 
-                # تصفية العناوين القصيرة أو غير المفيدة
-                if len(title) < 25:
-                    continue
+        # تخصيص آلية البحث حسب هيكلية كل موقع (يمكن تعديل الوسوم بما يتوافق مع النصوص المدخلة سابقاً)
+        # مثال افتراضي لجلب العناوين والروابط:
+        articles = soup.find_all("a", href=True)
 
-                if not link.startswith('http'):
-                    continue
+        for article in articles[:10]:  # فحص أحدث الروابط
+          title = article.get_text(strip=True)
+          link = article["href"]
 
-                if not is_published(link):
-                    # صياغة رسالة الخبر الرسمية والمنسقة
-                    message = (
-                        f"📢 **تحديث رسمي جديد**\n\n"
-                        f"📌 **العنوان:** {title}\n\n"
-                        f"🏛 **المصدر:** {source['name']}\n"
-                        f"🔗 [للاطلاع على التفاصيل الكاملة والمصدر]({link})\n\n"
-                        f"{source['tag']} #سورية"
-                    )
+          # تصفية الروابط للتأكد من أنها تخص الأخبار وليست روابط عامة
+          if len(title) > 20 and link.startswith("http"):
+            if not is_news_sent(link):
+              message = (
+                  f"📢 **خبر جديد من {source['name']}**\n\n"
+                  f"📌 **{title}**\n\n"
+                  f"🔗 [رابط الخبر]({link})"
+              )
 
-                    try:
-                        bot.send_message(
-                            chat_id=TELEGRAM_CHANNEL,
-                            text=message,
-                            parse_mode="Markdown",
-                            disable_web_page_preview=False
-                        )
-                        mark_as_published(link)
-                        logging.info(f"Successfully posted: {title}")
-                        time.sleep(5) # فاصل زمني لتجنب حظر التليجرام
-                    except Exception as e:
-                        logging.error(f"Error sending message to Telegram: {e}")
+              # إرسال الرسالة إلى قناة تيليجرام
+              # ملاحظة: يتم تشغيلها بشكل متوافق مع الدوال غير المتزامنة أو بالطريقة المباشرة
+              bot.send_message(
+                  chat_id=CHANNEL_ID, text=message, parse_mode="Markdown"
+              )
 
-        except Exception as e:
-            logging.error(f"Error fetching from {source['name']}: {e}")
+              mark_news_as_sent(link)
+              time.sleep(2)  # فاصل زمني لتجنب حظر الطلبات
+    except Exception as e:
+      print(f"Error scraping {source['name']}: {e}")
 
-def news_loop():
-    init_db()
-    while True:
-        logging.info("Checking for new official updates...")
-        fetch_and_post_news()
-        time.sleep(1800) # فحص التحديثات كل 30 دقيقة
+
+def worker_loop():
+  init_db()
+  while True:
+    scrape_and_send()
+    time.sleep(1800)  # الفحص كل نصف ساعة
+
 
 if __name__ == "__main__":
-    # تشغيل سيرفر Flask في خلفية مستقلة لـ UptimeRobot
-    flask_thread = Thread(target=run_flask)
-    flask_thread.daemon = True
-    flask_thread.start()
+  # تشغيل خادم Flask في خيط منفصل (Background Thread)
+  flask_thread = threading.Thread(target=run_flask)
+  flask_thread.daemon = True
+  flask_thread.start()
 
-    # تشغيل حلقة رصد الأخبار
-    news_loop()
+  # بدء حلقة فحص الأخبار وتحديثها
+  worker_loop()
