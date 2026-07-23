@@ -113,7 +113,7 @@ def send_to_telegram(title, full_text, link, media_url, pub_date=""):
         logging.error(f"Exception while sending to Telegram: {e}")
         return False
 
-# استخراج تفاصيل مقالات سانا 
+# استخراج تفاصيل مقالات سانا السياحية حصراً
 def fetch_sana_article_details(article_url):
     try:
         session = get_robust_session()
@@ -149,7 +149,7 @@ def fetch_sana_article_details(article_url):
                         continue
                     if not location_prefix and ('سانا' in p_text) and len(p_text) < 40:
                         location_prefix = p_text
-                        for prefix_candidate in ["دمشق-سانا", "حلب-سانا", "حمص-سانا", "اللاذقية-سانا", "طرطوس-سانا", "حماة-سانا", "دير الزور-سانا", "الحسكة-سانا", "الرقة-سانا", "درعا-سانا", "السويداء-سانا", "القنيطرة-سانا", "إدلب-سانا", "إسطنبول-سانا"]:
+                        for prefix_candidate in ["دمشق-سانا", "حلب-سانا", "حمص-سانا", "اللاذقية-سانا", "طرطوس-سانا", "حماة-سانا", "دير الزور-سانا", "الحسكة-سانا", "الرقة-سانا", "درعا-سانا", "السويداء-سانا", "القنيطرة-سانا", "إدلب-سانا"]:
                             if p_text.startswith(prefix_candidate):
                                 location_prefix = prefix_candidate
                                 p_text = p_text[len(prefix_candidate):].strip()
@@ -171,7 +171,7 @@ def fetch_sana_article_details(article_url):
         logging.error(f"Error fetching Sana details: {e}")
     return "تفاصيل الخبر متاحة عبر الرابط الرسمي أدناه.", None, ""
 
-# دالة جلب وتخزين الأخبار من الأرشيف والموقع بدون تكرار
+# دالة جلب وتخزين الأخبار من قسم السياحة حصراً مع فلترة صارمة للروابط
 def fetch_and_store_news():
     session = get_robust_session()
     headers = {'User-Agent': 'Mozilla/5.0'}
@@ -199,7 +199,8 @@ def fetch_and_store_news():
                         news_link = link_tag['href']
                         news_title = link_tag.get_text(strip=True)
                         
-                        if not news_link or '/en/' in news_link:
+                        # فلترة صارمة: قبول روابط السياحة حصراً واستبعاد أي قسم آخر (مثل international أو local العادية)
+                        if not news_link or '/tourism/' not in news_link or '/en/' in news_link:
                             continue
                         
                         cur.execute("SELECT id FROM posted_news WHERE news_url = %s", (news_link,))
@@ -211,12 +212,12 @@ def fetch_and_store_news():
                                     (news_link, news_title, full_text, media_url, 'sana', pub_date, 'pending')
                                 )
                                 conn.commit()
-                                logging.info(f"Stored unique Sana article: {news_title}")
+                                logging.info(f"Stored unique Tourism Sana article: {news_title}")
 
         cur.close()
         conn.close()
     except Exception as e:
-        logging.error(f"Error fetching diverse Sana news: {e}")
+        logging.error(f"Error fetching tourism Sana news: {e}")
 
 # إرسال عينة فورية عند التشغيل
 def send_immediate_sample_posts():
@@ -225,7 +226,6 @@ def send_immediate_sample_posts():
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
         cur = conn.cursor()
 
-        # اختيار أحدث تاريخ متوفر ضمن الأخبار المعلقة غير المكررة
         cur.execute("SELECT id, news_url, title, full_text, media_url, pub_date FROM posted_news WHERE status = 'pending' AND source = 'sana' ORDER BY pub_date DESC, id DESC LIMIT 1")
         row = cur.fetchone()
 
@@ -234,14 +234,14 @@ def send_immediate_sample_posts():
             if send_to_telegram(news_title, full_text, news_link, media_url, pub_date):
                 cur.execute("UPDATE posted_news SET status = 'sent' WHERE id = %s", (news_id,))
                 conn.commit()
-                logging.info(f"Immediate latest-date post sent: {news_title}")
+                logging.info(f"Immediate latest-date tourism post sent: {news_title}")
 
         cur.close()
         conn.close()
     except Exception as e:
         logging.error(f"Error in sending immediate sample: {e}")
 
-# عامل النشر الدوري (أولوية للخبر الأجدد تاريخاً أولاً، ثم الأقدم فالأقدم، بدون تكرار)
+# عامل النشر الدوري (ينشر منشورين معاً كل نصف ساعة لتعويض أي نقص وضمان التدفق الدقيق)
 def alternating_publisher_worker():
     while True:
         try:
@@ -252,25 +252,24 @@ def alternating_publisher_worker():
             conn = psycopg2.connect(DATABASE_URL, sslmode='require')
             cur = conn.cursor()
             
-            # استعلام يمنح الأولوية القصوى للمنشور الذي يحمل تاريخ النشر الأجدد (pub_date DESC) ثم الأقدم فالأقدم
+            # جلب منشورين في كل دورة بناءً على الأحدث تاريخاً لضمان وصول منشورين كما طلبت
             query = """
                 SELECT id, news_url, title, full_text, media_url, pub_date 
                 FROM posted_news 
                 WHERE status = 'pending' AND source = 'sana'
                 ORDER BY pub_date DESC, id DESC 
-                LIMIT 1
+                LIMIT 2
             """
             cur.execute(query)
-            row = cur.fetchone()
+            rows = cur.fetchall()
             
-            if row:
+            for row in rows:
                 news_id, news_link, news_title, full_text, media_url, pub_date = row
                 if send_to_telegram(news_title, full_text, news_link, media_url, pub_date):
                     cur.execute("UPDATE posted_news SET status = 'sent' WHERE id = %s", (news_id,))
                     conn.commit()
-                    logging.info(f"Scheduled latest-date Sana post sent: {news_title}")
-            else:
-                logging.info("لا توجد منشورات جديدة معلقة حالياً.")
+                    logging.info(f"Scheduled tourism Sana post sent: {news_title}")
+                time.sleep(3) # فاصل زمني قصير بين المنشورين لمنع الحظر من تليجرام
                     
             cur.close()
             conn.close()
