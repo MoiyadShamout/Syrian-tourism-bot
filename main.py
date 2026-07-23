@@ -18,7 +18,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return {"status": "active", "message": "Syrian Tourism Ministry-Dedicated Bot is running smoothly!"}, 200
+    return {"status": "active", "message": "Syrian Tourism Safe Text Bot is running smoothly!"}, 200
 
 # جلب الإعدادات من متغيرات البيئة
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -62,7 +62,7 @@ def init_db():
     except Exception as e:
         logging.error(f"Error initializing database: {e}")
 
-# دالة إرسال المقال إلى تليجرام بالتنسيق المطلوب
+# دالة إرسال المقال إلى تليجرام بنص عادي وآمن (بدون Markdown لتفادي الأخطاء نهائياً)
 def send_to_telegram(title, full_text, link, media_url, source_name="sana", pub_date=""):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
         logging.error("Telegram credentials are missing!")
@@ -78,13 +78,14 @@ def send_to_telegram(title, full_text, link, media_url, source_name="sana", pub_
     formatted_date = pub_date if pub_date else "غير محدد"
     safe_text = full_text if full_text else "تفاصيل الخبر متاحة عبر الرابط الرسمي أدناه."
     
+    # رسالة بنص عادي بالكامل خالية من أي ترميز معقد يسبب مشاكل لتليجرام
     caption = (
-        f"🏛️ **مصدر المنشور:** {source_label}\n"
-        f"📅 **تاريخ النشر:** {formatted_date}\n\n"
-        f"📌 **{title}**\n\n"
+        f"مصدر المنشور: {source_label}\n"
+        f"تاريخ النشر: {formatted_date}\n\n"
+        f"{title}\n\n"
         f"{safe_text[:650]}...\n\n"
         f"يمكنكم متابعة تفاصيل الخبر رسمياً عبر الرابط أدناه:\n"
-        f"🔗 {link}\n\n"
+        f"{link}\n\n"
         f"#السياحة_السورية {source_tag} #سوريا"
     )
 
@@ -95,28 +96,21 @@ def send_to_telegram(title, full_text, link, media_url, source_name="sana", pub_
             payload = {
                 "chat_id": TELEGRAM_CHANNEL_ID,
                 "photo": media_url,
-                "caption": caption,
-                "parse_mode": "Markdown"
+                "caption": caption
             }
         else:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             payload = {
                 "chat_id": TELEGRAM_CHANNEL_ID,
                 "text": caption,
-                "parse_mode": "Markdown",
                 "disable_web_page_preview": False
             }
 
         response = session.post(url, json=payload, timeout=15)
         if response.status_code == 200:
-            logging.info(f"Formatted post from [{source_name}] sent to Telegram successfully.")
+            logging.info(f"Post from [{source_name}] sent to Telegram successfully.")
             return True
         else:
-            if "Markdown" in response.text:
-                payload.pop("parse_mode", None)
-                response = session.post(url, json=payload, timeout=15)
-                if response.status_code == 200:
-                    return True
             logging.error(f"Failed to send to Telegram: {response.text}")
             return False
     except Exception as e:
@@ -152,8 +146,10 @@ def fetch_sana_article_details(article_url):
         logging.error(f"Error fetching Sana details: {e}")
     return "تفاصيل الخبر متاحة عبر الرابط الرسمي أدناه.", None, ""
 
-# استخراج تفاصيل موقع وزارة السياحة
+# استخراج تفاصيل موقع وزارة السياحة مع تصفية الروابط غير الصالحة
 def fetch_ministry_article_details(article_url):
+    if not article_url or article_url.startswith('mailto:') or article_url.startswith('tel:'):
+        return None, None, ""
     try:
         session = get_robust_session()
         headers = {'User-Agent': 'Mozilla/5.0'}
@@ -183,7 +179,7 @@ def fetch_ministry_article_details(article_url):
         logging.error(f"Error fetching Ministry details: {e}")
     return "تفاصيل الخبر متاحة عبر الرابط الرسمي أدناه.", None, ""
 
-# جلب وتخزين الأخبار من المصدرين
+# جلب وتخزين الأخبار مع التحقق من الروابط
 def fetch_and_store_news():
     session = get_robust_session()
     headers = {'User-Agent': 'Mozilla/5.0'}
@@ -204,7 +200,7 @@ def fetch_and_store_news():
                     news_link = link_tag['href']
                     news_title = link_tag.get_text(strip=True)
                     
-                    if '/en/' in news_link:
+                    if not news_link or news_link.startswith('mailto:') or '/en/' in news_link:
                         continue
                         
                     cur.execute("SELECT id FROM posted_news WHERE news_url = %s", (news_link,))
@@ -230,6 +226,9 @@ def fetch_and_store_news():
                 news_link = tag['href']
                 news_title = tag.get_text(strip=True)
                 
+                if not news_link or news_link.startswith('mailto:') or news_link.startswith('tel:'):
+                    continue
+                
                 if ('mots.gov.sy' in news_link or news_link.startswith('/')) and len(news_title) > 15:
                     if news_link.startswith('/'):
                         news_link = "https://mots.gov.sy" + news_link
@@ -240,18 +239,19 @@ def fetch_and_store_news():
                     cur.execute("SELECT id FROM posted_news WHERE news_url = %s", (news_link,))
                     if not cur.fetchone():
                         full_text, media_url, pub_date = fetch_ministry_article_details(news_link)
-                        cur.execute(
-                            "INSERT INTO posted_news (news_url, title, full_text, media_url, source, pub_date, status) VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                            (news_link, news_title, full_text, media_url, 'ministry', pub_date, 'pending')
-                        )
-                        conn.commit()
+                        if full_text:
+                            cur.execute(
+                                "INSERT INTO posted_news (news_url, title, full_text, media_url, source, pub_date, status) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                                (news_link, news_title, full_text, media_url, 'ministry', pub_date, 'pending')
+                            )
+                            conn.commit()
     except Exception as e:
         logging.error(f"Error fetching Ministry news: {e}")
 
     cur.close()
     conn.close()
 
-# نشر عينة فورية حصراً من موقع وزارة السياحة (مع جلب مباشر إذا كانت القاعدة فارغة للموقع)
+# نشر عينة فورية حصراً من موقع وزارة السياحة
 def send_immediate_sample_posts():
     try:
         time.sleep(5)
@@ -260,11 +260,9 @@ def send_immediate_sample_posts():
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
         cur = conn.cursor()
         
-        # البحث عن خبر معلق لوزارة السياحة في القاعدة
         cur.execute("SELECT id, news_url, title, full_text, media_url, source, pub_date FROM posted_news WHERE status = 'pending' AND source = 'ministry' ORDER BY id ASC LIMIT 1")
         row = cur.fetchone()
         
-        # إذا لم يكن مخزناً بعد، نقوم بسحبه مباشرة وبشكل فوري الآن من موقع الوزارة لضمان إرساله فوراً
         if not row:
             try:
                 ministry_url = "https://mots.gov.sy/"
@@ -274,6 +272,8 @@ def send_immediate_sample_posts():
                     for tag in soup.find_all('a', href=True):
                         news_link = tag['href']
                         news_title = tag.get_text(strip=True)
+                        if not news_link or news_link.startswith('mailto:') or news_link.startswith('tel:'):
+                            continue
                         if ('mots.gov.sy' in news_link or news_link.startswith('/')) and len(news_title) > 15:
                             if news_link.startswith('/'):
                                 news_link = "https://mots.gov.sy" + news_link
@@ -281,16 +281,16 @@ def send_immediate_sample_posts():
                                 continue
                             
                             full_text, media_url, pub_date = fetch_ministry_article_details(news_link)
-                            cur.execute(
-                                "INSERT INTO posted_news (news_url, title, full_text, media_url, source, pub_date, status) VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (news_url) DO NOTHING",
-                                (news_link, news_title, full_text, media_url, 'ministry', pub_date, 'pending')
-                            )
-                            conn.commit()
-                            break
+                            if full_text:
+                                cur.execute(
+                                    "INSERT INTO posted_news (news_url, title, full_text, media_url, source, pub_date, status) VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (news_url) DO NOTHING",
+                                    (news_link, news_title, full_text, media_url, 'ministry', pub_date, 'pending')
+                                )
+                                conn.commit()
+                                break
             except Exception as e:
                 logging.error(f"Direct fetch ministry immediate error: {e}")
 
-            # إعادة محاولة الجلب من القاعدة بعد الإدخال المباشر
             cur.execute("SELECT id, news_url, title, full_text, media_url, source, pub_date FROM posted_news WHERE status = 'pending' AND source = 'ministry' ORDER BY id ASC LIMIT 1")
             row = cur.fetchone()
 
