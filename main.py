@@ -28,8 +28,6 @@ def init_db():
     try:
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
         cur = conn.cursor()
-        
-        # إنشاء الجدول أساساً إن لم يكن موجوداً
         cur.execute('''
             CREATE TABLE IF NOT EXISTS posted_news (
                 id SERIAL PRIMARY KEY,
@@ -38,11 +36,8 @@ def init_db():
                 status TEXT DEFAULT 'pending'
             )
         ''')
-        
-        # إضافة الأعمدة الجديدة بأمان إذا كانت مفقودة في الجداول القديمة
         cur.execute("ALTER TABLE posted_news ADD COLUMN IF NOT EXISTS full_text TEXT;")
         cur.execute("ALTER TABLE posted_news ADD COLUMN IF NOT EXISTS media_url TEXT;")
-        
         conn.commit()
         cur.close()
         conn.close()
@@ -79,10 +74,11 @@ def send_to_telegram(title, full_text, link, media_url, is_urgent=False):
         category_tag = "#استثمار_سياحي #مشاريع_سورية"
         header = "أفق الاستثمار والمشاريع السياحية"
 
+    safe_text = full_text if full_text else "التفاصيل متاحة عبر الرابط الرسمي."
     caption = (
         f"{icon} **{header}**\n\n"
         f"📌 **{title}**\n\n"
-        f"{full_text[:600]}...\n\n"
+        f"{safe_text[:600]}...\n\n"
         f"🔗 [قراءة التفاصيل والخبر كاملاً من الموقع الرسمي]({link})\n\n"
         f"{category_tag} #وزارة_السياحة #سانا"
     )
@@ -167,7 +163,7 @@ def fetch_and_store_news():
 
 def send_immediate_sample_post():
     try:
-        time.sleep(6)
+        time.sleep(8) # اعطاء وقت كافي لجلب الأخبار وحفظها أولاً
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
         cur = conn.cursor()
         cur.execute("SELECT id, news_url, title, full_text, media_url FROM posted_news WHERE status = 'pending' ORDER BY id ASC LIMIT 1")
@@ -179,6 +175,8 @@ def send_immediate_sample_post():
                 cur.execute("UPDATE posted_news SET status = 'sent' WHERE id = %s", (news_id,))
                 conn.commit()
                 logging.info("Immediate sample post sent successfully.")
+        else:
+            logging.info("No pending news found for immediate post.")
         cur.close()
         conn.close()
     except Exception as e:
