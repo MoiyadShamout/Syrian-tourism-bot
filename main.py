@@ -4,6 +4,8 @@ import logging
 from datetime import datetime
 import threading
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 import psycopg2
 from flask import Flask
@@ -16,12 +18,20 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return {"status": "active", "message": "Syrian Tourism Ministry-Focused Bot is running smoothly!"}, 200
+    return {"status": "active", "message": "Syrian Tourism Robust Bot is running smoothly!"}, 200
 
 # جلب الإعدادات من متغيرات البيئة
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID")
 DATABASE_URL = os.environ.get("DATABASE_URL")
+
+# إعداد جلسة طلبات مع إعادة محاولة تلقائية لتجنب أخطاء الاتصال المفاجئة
+def get_robust_session():
+    session = requests.Session()
+    retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+    session.mount('https://', HTTPAdapter(max_retries=retries))
+    session.mount('http://', HTTPAdapter(max_retries=retries))
+    return session
 
 # دالة الاتصال بقاعدة البيانات وإعداد الجداول
 def init_db():
@@ -79,6 +89,7 @@ def send_to_telegram(title, full_text, link, media_url, source_name="sana", pub_
     )
 
     try:
+        session = get_robust_session()
         if media_url and (media_url.endswith(('.jpg', '.png', '.jpeg', '.webp'))):
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
             payload = {
@@ -96,14 +107,14 @@ def send_to_telegram(title, full_text, link, media_url, source_name="sana", pub_
                 "disable_web_page_preview": False
             }
 
-        response = requests.post(url, json=payload)
+        response = session.post(url, json=payload, timeout=15)
         if response.status_code == 200:
             logging.info(f"Formatted post from [{source_name}] sent to Telegram successfully.")
             return True
         else:
             if "Markdown" in response.text:
                 payload.pop("parse_mode", None)
-                response = requests.post(url, json=payload)
+                response = session.post(url, json=payload, timeout=15)
                 if response.status_code == 200:
                     return True
             logging.error(f"Failed to send to Telegram: {response.text}")
@@ -115,8 +126,9 @@ def send_to_telegram(title, full_text, link, media_url, source_name="sana", pub_
 # استخراج تفاصيل سانا
 def fetch_sana_article_details(article_url):
     try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        resp = requests.get(article_url, headers=headers, timeout=10)
+        session = get_robust_session()
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        resp = session.get(article_url, headers=headers, timeout=20)
         pub_date = ""
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, 'html.parser')
@@ -137,14 +149,15 @@ def fetch_sana_article_details(article_url):
             media_url = img_tag.get('src') if img_tag else None
             return full_text, media_url, pub_date
     except Exception as e:
-        logging.error(f"Error fetching Sana details: {e}")
+        logging.error(f"Error fetching Sana details from {article_url}: {e}")
     return "تفاصيل الخبر متاحة عبر الرابط الرسمي أدناه.", None, ""
 
-# استخراج تفاصيل موقع وزارة السياحة
+# استخراج تفاصيل موقع وزارة السياحة مع معالجة بطء الخادم
 def fetch_ministry_article_details(article_url):
     try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        resp = requests.get(article_url, headers=headers, timeout=10)
+        session = get_robust_session()
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        resp = session.get(article_url, headers=headers, timeout=25)
         pub_date = ""
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, 'html.parser')
@@ -167,19 +180,20 @@ def fetch_ministry_article_details(article_url):
                 media_url = "https://mots.gov.sy" + media_url
             return full_text, media_url, pub_date
     except Exception as e:
-        logging.error(f"Error fetching Ministry details: {e}")
+        logging.error(f"Error fetching Ministry details from {article_url}: {e}")
     return "تفاصيل الخبر متاحة عبر الرابط الرسمي أدناه.", None, ""
 
 # جلب وتخزين الأخبار من المصدرين
 def fetch_and_store_news():
+    session = get_robust_session()
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
     conn = psycopg2.connect(DATABASE_URL, sslmode='require')
     cur = conn.cursor()
-    headers = {'User-Agent': 'Mozilla/5.0'}
 
     # 1. سانا
     try:
         sana_url = "https://sana.sy/tourism/"
-        response = requests.get(sana_url, headers=headers, timeout=15)
+        response = session.get(sana_url, headers=headers, timeout=20)
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
             articles = soup.find_all('h3', class_='entry-title') or soup.find_all('h2', class_='entry-title') or soup.find_all('a', class_='item-title')
@@ -204,10 +218,10 @@ def fetch_and_store_news():
     except Exception as e:
         logging.error(f"Error fetching Sana news: {e}")
 
-    # 2. وزارة السياحة
+    # 2. وزارة السياحة مع زيادة مهلة الانتظار للتعامل مع بطء الخادم
     try:
         ministry_url = "https://mots.gov.sy/"
-        response = requests.get(ministry_url, headers=headers, timeout=15)
+        response = session.get(ministry_url, headers=headers, timeout=25)
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
             links = soup.find_all('a', href=True)
@@ -240,28 +254,33 @@ def fetch_and_store_news():
 # نشر عينة فورية حصراً من موقع وزارة السياحة للمعاينة
 def send_immediate_sample_posts():
     try:
-        time.sleep(5)
+        time.sleep(6)
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
         cur = conn.cursor()
         
-        # جلب ونشر خبر فوري من موقع وزارة السياحة فقط
+        # محاولة جلب خبر من وزارة السياحة؛ وإذا لم يتوفر مؤقتاً بسبب بطء الموقع، يجلب من سانا كبديل فوري مؤقت لضمان المعاينة
         cur.execute("SELECT id, news_url, title, full_text, media_url, source, pub_date FROM posted_news WHERE status = 'pending' AND source = 'ministry' ORDER BY id ASC LIMIT 1")
-        row_min = cur.fetchone()
-        if row_min:
-            news_id, news_link, news_title, full_text, media_url, source_name, pub_date = row_min
+        row = cur.fetchone()
+        
+        if not row:
+            cur.execute("SELECT id, news_url, title, full_text, media_url, source, pub_date FROM posted_news WHERE status = 'pending' AND source = 'sana' ORDER BY id ASC LIMIT 1")
+            row = cur.fetchone()
+
+        if row:
+            news_id, news_link, news_title, full_text, media_url, source_name, pub_date = row
             if send_to_telegram(news_title, full_text, news_link, media_url, source_name, pub_date):
                 cur.execute("UPDATE posted_news SET status = 'sent' WHERE id = %s", (news_id,))
                 conn.commit()
 
         cur.close()
         conn.close()
-        logging.info("Immediate Ministry preview sample sent.")
+        logging.info("Immediate preview sample processed.")
     except Exception as e:
         logging.error(f"Error sending immediate sample post: {e}")
 
 # عامل النشر الدوري كل نصف ساعة بالتناوب بين المصدرين
 def alternating_publisher_worker():
-    last_source = 'ministry'  # لضمان أن يبدأ النشر الدوري تليها من سانا
+    last_source = 'ministry'
     while True:
         try:
             time.sleep(1800)  # كل 30 دقيقة
