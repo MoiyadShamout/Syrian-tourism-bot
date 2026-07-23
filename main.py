@@ -75,7 +75,6 @@ def send_to_telegram(title, full_text, link, media_url, pub_date=""):
     if len(safe_text) > 550:
         safe_text = safe_text[:550] + "..."
 
-    # التنسيق القديم المطلوب تماماً
     caption = (
         f"مصدر المنشور: {source_label}\n"
         f"تاريخ النشر: {formatted_date}\n\n"
@@ -236,7 +235,7 @@ def send_immediate_sample_posts():
     except Exception as e:
         logging.error(f"Error in sending immediate sample: {e}")
 
-# عامل النشر الدوري (نظام الأولوية والأحدث مستمر كما اتفقنا)
+# عامل النشر الدوري (مع تدوير المنشورات القديمة في حال غياب الجديدة)
 def alternating_publisher_worker():
     while True:
         try:
@@ -245,7 +244,7 @@ def alternating_publisher_worker():
             conn = psycopg2.connect(DATABASE_URL, sslmode='require')
             cur = conn.cursor()
             
-            # استعلام يفرز القرارات الهامة أولاً، ثم يجلب الأحدث بناءً على المعرف
+            # 1. البحث أولاً عن الأخبار المعلقة (pending) مع أولوية القرارات والأحدث
             query = """
                 SELECT id, news_url, title, full_text, media_url, pub_date 
                 FROM posted_news 
@@ -261,14 +260,25 @@ def alternating_publisher_worker():
             cur.execute(query)
             row = cur.fetchone()
             
+            # 2. إذا لم توجد أخبار جديدة، يتم اختيار أقدم خبر تم نشره مسبقاً لإعادة تدويره
+            if not row:
+                fallback_query = """
+                    SELECT id, news_url, title, full_text, media_url, pub_date 
+                    FROM posted_news 
+                    WHERE status = 'sent' AND source = 'sana'
+                    ORDER BY id ASC 
+                    LIMIT 1
+                """
+                cur.execute(fallback_query)
+                row = cur.fetchone()
+            
             if row:
                 news_id, news_link, news_title, full_text, media_url, pub_date = row
                 if send_to_telegram(news_title, full_text, news_link, media_url, pub_date):
+                    # تحديث الحالة إلى sent لضمان استمرار الدورة المستمرة
                     cur.execute("UPDATE posted_news SET status = 'sent' WHERE id = %s", (news_id,))
                     conn.commit()
-                    logging.info(f"Scheduled Sana post sent: {news_title}")
-            else:
-                logging.info("لا توجد أخبار جديدة معلقة للنشر في هذه النصف ساعة.")
+                    logging.info(f"Scheduled/Recycled Sana post sent: {news_title}")
                     
             cur.close()
             conn.close()
