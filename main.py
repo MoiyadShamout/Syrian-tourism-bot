@@ -1,184 +1,199 @@
 import os
 import time
-import threading
-import asyncio
-import requests
-import psycopg2
-import urllib3
-from bs4 import BeautifulSoup
+import logging
 from datetime import datetime
-from telegram import Bot
+import threading
+import requests
+from bs4 import BeautifulSoup
+import psycopg2
 from flask import Flask
 
-# إخفاء تحذيرات شهادة الأمان (SSL) الخاصة بموقع الوزارة
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+# إعداد السجلات (Logging)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# ==========================================
-# 1. إعدادات البيئة (Environment Variables)
-# ==========================================
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN")
-CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID", "@YOUR_CHANNEL")
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:password@host/dbname")
-PORT = int(os.environ.get("PORT", 5000))
-TARGET_URL = "https://mots.gov.sy/"
-
-bot = Bot(token=TOKEN)
+# إعداد تطبيق Flask لاستجابة UptimeRobot وضمان عدم نوم الخدمة على Render
 app = Flask(__name__)
 
-# ==========================================
-# 2. الكلمات المفتاحية للفلترة الذكية
-# ==========================================
-# إذا وجد البوت إحدى هذه الكلمات، سيعتبره "قراراً هاماً" وينسقه كأرشيف
-IMPORTANT_KEYWORDS = [
-    "ترخيص", "مكاتب", "سفر", "مفاضلة", "قانون", 
-    "مرسوم", "تعميم", "قرار", "تعليمات", "المعهد"
-]
+@app.route('/')
+def home():
+    return {"status": "active", "message": "Syrian Tourism Bot is running smoothly!"}, 200
 
-# ==========================================
-# 3. إدارة قاعدة البيانات (PostgreSQL)
-# ==========================================
+# جلب الإعدادات من متغيرات البيئة (Environment Variables)
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID")
+DATABASE_URL = os.environ.get("DATABASE_URL")
+
+# دالة الاتصال بقاعدة البيانات وإنشاء الجدول إذا لم يكن موجوداً
 def init_db():
-    """إنشاء الجدول إذا لم يكن موجوداً لحفظ روابط الأخبار المرسلة"""
-    conn = psycopg2.connect(DATABASE_URL)
-    cur = conn.cursor()
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS sent_tourism_news (
-            url TEXT PRIMARY KEY
-        )
-    ''')
-    conn.commit()
-    cur.close()
-    conn.close()
-
-def is_news_sent(url):
-    """التحقق مما إذا كان الخبر قد تم إرساله مسبقاً"""
-    conn = psycopg2.connect(DATABASE_URL)
-    cur = conn.cursor()
-    cur.execute("SELECT 1 FROM sent_tourism_news WHERE url = %s", (url,))
-    result = cur.fetchone()
-    cur.close()
-    conn.close()
-    return result is not None
-
-def mark_news_as_sent(url):
-    """تسجيل رابط الخبر في قاعدة البيانات لمنع تكراره"""
-    conn = psycopg2.connect(DATABASE_URL)
-    cur = conn.cursor()
-    cur.execute("INSERT INTO sent_tourism_news (url) VALUES (%s) ON CONFLICT (url) DO NOTHING", (url,))
-    conn.commit()
-    cur.close()
-    conn.close()
-
-# ==========================================
-# 4. التنسيق والإرسال إلى تيليجرام (Async)
-# ==========================================
-async def send_to_telegram(title, link, date_str, image_url):
-    # الفلترة الذكية: فحص العنوان لمعرفة أهمية الخبر
-    is_important = any(keyword in title for keyword in IMPORTANT_KEYWORDS)
-    
-    if is_important:
-        header = "📜 <b>أرشيف التشريعات والقرارات السياحية</b>\n🏛️ <b>(هام لمكاتب السياحة والسفر والطلاب)</b>\n\n"
-        tags = "#قوانين_السياحة #قرارات_رسمية #وزارة_السياحة"
-    else:
-        header = "🏛️ <b>وزارة السياحة السورية - تحديث جديد</b>\n\n"
-        tags = "#أخبار_السياحة #سوريا"
-
-    caption = (
-        f"{header}"
-        f"📌 <b>العنوان:</b> {title}\n"
-        f"📅 <b>التاريخ:</b> {date_str}\n\n"
-        f"🔗 <a href='{link}'>لقراءة التفاصيل والخبر كاملاً من الموقع الرسمي</a>\n\n"
-        f"{tags}"
-    )
-
     try:
-        if image_url:
-            await bot.send_photo(chat_id=CHANNEL_ID, photo=image_url, caption=caption, parse_mode="HTML")
-        else:
-            await bot.send_message(chat_id=CHANNEL_ID, text=caption, parse_mode="HTML", disable_web_page_preview=False)
-        print(f"تم بنجاح إرسال: {title}")
+        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+        cur = conn.cursor()
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS posted_news (
+                id SERIAL PRIMARY KEY,
+                news_url TEXT UNIQUE,
+                title TEXT,
+                status TEXT DEFAULT 'pending'
+            )
+        ''')
+        conn.commit()
+        cur.close()
+        conn.close()
+        logging.info("Database initialized successfully.")
     except Exception as e:
-        print(f"خطأ أثناء الإرسال لتيليجرام: {e}")
+        logging.error(f"Error initializing database: {e}")
 
-# ==========================================
-# 5. محرك سحب الأخبار (Web Scraper)
-# ==========================================
-def check_website_updates():
-    print("جاري فحص موقع وزارة السياحة بحثاً عن مستجدات...")
+# دالة إرسال الرسائل إلى قناة التليجرام
+def send_to_telegram(message):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
+        logging.error("Telegram credentials are missing!")
+        return False
+    
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHANNEL_ID,
+        "text": message,
+        "parse_mode": "Markdown",
+        "disable_web_page_preview": False
+    }
     try:
-        response = requests.get(TARGET_URL, verify=False, timeout=20)
+        response = requests.post(url, json=payload)
+        if response.status_code == 200:
+            logging.info("Message sent to Telegram successfully.")
+            return True
+        else:
+            logging.error(f"Failed to send to Telegram: {response.text}")
+            return False
+    except Exception as e:
+        logging.error(f"Exception while sending to Telegram: {e}")
+        return False
+
+# دالة تحديد الأيقونة والتصنيف حسب الوقت أو نوع الخبر
+def format_news_message(title, link, is_urgent=False):
+    current_hour = datetime.now().hour
+    
+    if is_urgent:
+        icon = "🚨"
+        category_tag = "#عاجل #تعميم_رسمي"
+        header = "عاجل | تحديث رسمي جديد"
+    elif 9 <= current_hour < 12:
+        icon = "☀️"
+        category_tag = "#النشاطات_السياحية #قطاع_تعليمي"
+        header = "نشاطات السياحة والقطاع الأكاديمي"
+    elif 12 <= current_hour < 16:
+        icon = "⚖️"
+        category_tag = "#قرارات_رسمية #مكاتب_السفر #قوانين_السفر"
+        header = "تحديثات القرارات وقوانين المكاتب"
+    elif 16 <= current_hour < 21:
+        icon = "🌇"
+        category_tag = "#معالم_سياحية #سياحة_سورية #اثار_سوريا #دليل_السفر"
+        header = "دليل السياحة السورية | محطة مسائية"
+    else:
+        icon = "🌙✨"
+        category_tag = "#استثمار_سياحي #مشاريع_سورية"
+        header = "أفق الاستثمار والمشاريع السياحية"
+
+    formatted_message = (
+        f"{icon} **{header}**\n\n"
+        f"📌 **العنوان:** {title}\n"
+        f"📅 **التاريخ:** {datetime.now().strftime('%d-%m-%Y')}\n\n"
+        f"🔗 [قراءة التفاصيل والخبر كاملاً من الموقع الرسمي]({link})\n\n"
+        f"{category_tag} #وزارة_السياحة #سانا"
+    )
+    return formatted_message
+
+# دالة فحص وجلب الأخبار من المواقع الرسمية
+def fetch_and_store_news():
+    try:
+        # كمثال مبدئي، نقوم بطلب جلب الأخبار من وكالة سانا قسم السياحة أو موقع الوزارة
+        target_url = "https://sana.sy/en/tour-syria/"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(target_url, headers=headers, timeout=15)
+        
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
+            # استخراج العناوين والروابط (تعتمد على بنية الموقع الفعلي)
+            articles = soup.find_all('h3', class_='entry-title') or soup.find_all('a', class_='item-title')
             
-            # استهداف حاويات الأخبار الشائعة أو الروابط كبديل شامل
-            news_containers = soup.find_all(['div', 'article'], class_=['news-item', 'post', 'card', 'item'])
-            if not news_containers:
-                news_containers = soup.find_all('a', href=True)
-
-            for item in news_containers:
-                if item.name == 'a':
-                    link = item['href']
-                    title = item.get_text(strip=True)
-                    img_tag = item.find('img')
-                    date_tag = None
-                else:
-                    a_tag = item.find('a')
-                    if not a_tag: continue
-                    link = a_tag.get('href', '')
-                    title = a_tag.get_text(strip=True) or item.get_text(strip=True)
-                    img_tag = item.find('img')
-                    date_tag = item.find(class_=['date', 'time', 'post-date'])
-                
-                # تصفية الروابط العشوائية والقصيرة جداً
-                if not link or len(title) < 15 or link.startswith('#') or 'javascript' in link:
-                    continue
-                
-                # معالجة الروابط لتكون كاملة
-                if link.startswith('/'):
-                    link = "https://mots.gov.sy" + link
-                elif not link.startswith('http'):
-                    continue 
-
-                date_str = date_tag.get_text(strip=True) if date_tag else datetime.now().strftime('%Y-%m-%d')
-                
-                # معالجة الصور
-                image_url = None
-                if img_tag and img_tag.get('src'):
-                    img_src = img_tag['src']
-                    image_url = f"https://mots.gov.sy{img_src}" if img_src.startswith('/') else img_src
-
-                # فحص قاعدة البيانات وإرسال الجديد فقط
-                if not is_news_sent(link):
-                    asyncio.run(send_to_telegram(title, link, date_str, image_url))
-                    mark_news_as_sent(link)
-                    time.sleep(3) # فاصل زمني لتجنب حظر التيليجرام
-
-        else:
-            print(f"فشل الاتصال بموقع الوزارة. كود: {response.status_code}")
+            conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+            cur = conn.cursor()
+            
+            for art in articles[:5]: # أخذ أحدث 5 مقالات
+                link_tag = art.find('a') if art.name != 'a' else art
+                if link_tag and link_tag.get('href'):
+                    news_link = link_tag['href']
+                    news_title = link_tag.get_text(strip=True)
+                    
+                    # التحقق مما إذا كان الخبر موجوداً مسبقاً في قاعدة البيانات
+                    cur.execute("SELECT id FROM posted_news WHERE news_url = %s", (news_link,))
+                    exists = cur.fetchone()
+                    
+                    if not exists:
+                        # إدخال الخبر بحالة pending (قيد الانتظار)
+                        cur.execute(
+                            "INSERT INTO posted_news (news_url, title, status) VALUES (%s, %s, %s)",
+                            (news_link, news_title, 'pending')
+                        )
+                        conn.commit()
+                        logging.info(f"New article saved to DB: {news_title}")
+                        
+                        # فحص هل هو خبر عاجل لنشره فوراً
+                        if "عاجل" in news_title or "تعميم" in news_title:
+                            msg = format_news_message(news_title, news_link, is_urgent=True)
+                            if send_to_telegram(msg):
+                                cur.execute("UPDATE posted_news SET status = 'sent' WHERE news_url = %s", (news_link,))
+                                conn.commit()
+            
+            cur.close()
+            conn.close()
     except Exception as e:
-        print(f"حدث خطأ أثناء فحص الموقع: {e}")
+        logging.error(f"Error while fetching news: {e}")
 
-# ==========================================
-# 6. حلقة التكرار والخادم المؤقت (Keep-Alive)
-# ==========================================
-def worker_loop():
-    init_db()
+# دالة النشر المجدول (منشور واحد كل ساعة)
+def hourly_publisher_worker():
     while True:
-        check_website_updates()
-        time.sleep(600) # إعادة الفحص كل 10 دقائق
+        try:
+            time.sleep(3600) # الانتظار لمدة ساعة كاملة (3600 ثانية)
+            logging.info("Running hourly publisher worker...")
+            
+            conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+            cur = conn.cursor()
+            
+            # البحث عن أول خبر بحالة pending
+            cur.execute("SELECT id, news_url, title FROM posted_news WHERE status = 'pending' ORDER BY id ASC LIMIT 1")
+            row = cur.fetchone()
+            
+            if row:
+                news_id, news_link, news_title = row
+                msg = format_news_message(news_title, news_link, is_urgent=False)
+                
+                if send_to_telegram(msg):
+                    cur.execute("UPDATE posted_news SET status = 'sent' WHERE id = %s", (news_id,))
+                    conn.commit()
+                    logging.info(f"Hourly scheduled news published: {news_title}")
+            
+            cur.close()
+            conn.close()
+        except Exception as e:
+            logging.error(f"Error in hourly publisher worker: {e}")
 
-@app.route("/")
-def home():
-    return "Syrian Tourism Bot is running beautifully and monitoring mots.gov.sy!"
+# دالة السكربت الدوري لجلب الأخبار في الخلفية (كل 15 دقيقة)
+def background_scraper_worker():
+    while True:
+        fetch_and_store_news()
+        time.sleep(900) # الانتظار 15 دقيقة قبل الفحص التالي
 
-def run_flask():
-    app.run(host="0.0.0.0", port=PORT)
-
+# نقطة التشغيل الرئيسية
 if __name__ == "__main__":
-    # تشغيل خادم الويب في مسار خلفي
-    flask_thread = threading.Thread(target=run_flask)
-    flask_thread.daemon = True
-    flask_thread.start()
-
-    # تشغيل مراقب الأخبار
-    worker_loop()
+    init_db()
+    
+    # تشغيل مهام الخلفية في خيوط منفصلة (Threads) لتعمل بالتوازي مع خادم الويب
+    scraper_thread = threading.Thread(target=background_scraper_worker, daemon=True)
+    scraper_thread.start()
+    
+    publisher_thread = threading.Thread(target=hourly_publisher_worker, daemon=True)
+    publisher_thread.start()
+    
+    # تشغيل خادم Flask (ضروري لمنصة Render و UptimeRobot)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
