@@ -131,7 +131,6 @@ def fetch_sana_article_details(article_url):
             # البحث عن الصورة البارزة الرسمية المعتمدة في رأس المقال
             img_tag = soup.find('img', class_='wp-post-image')
             if not img_tag:
-                # محاولة البحث ضمن عناصر هيدر المقال أو الحاوية الرئيسية
                 featured_div = soup.find('div', class_='entry-featured') or soup.find('div', class_='post-thumbnail')
                 if featured_div:
                     img_tag = featured_div.find('img')
@@ -217,14 +216,15 @@ def fetch_and_store_news():
     except Exception as e:
         logging.error(f"Error fetching Sana news: {e}")
 
-# نشر عينة فورية حصراً من سانا
+# نشر عينة فورية لإعادة إرسال أحدث مقال وتجربة الصورة فوراً عند التشغيل
 def send_immediate_sample_posts():
     try:
-        time.sleep(5)
+        time.sleep(6)
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
         cur = conn.cursor()
         
-        cur.execute("SELECT id, news_url, title, full_text, media_url, pub_date FROM posted_news WHERE status = 'pending' AND source = 'sana' ORDER BY id ASC LIMIT 1")
+        # اختيار أحدث مقال مخزّن بغض النظر عن حالته لتجربته فوراً
+        cur.execute("SELECT id, news_url, title, full_text, media_url, pub_date FROM posted_news WHERE source = 'sana' ORDER BY id DESC LIMIT 1")
         row = cur.fetchone()
 
         if row:
@@ -232,7 +232,7 @@ def send_immediate_sample_posts():
             if send_to_telegram(news_title, full_text, news_link, media_url, pub_date):
                 cur.execute("UPDATE posted_news SET status = 'sent' WHERE id = %s", (news_id,))
                 conn.commit()
-                logging.info(f"Immediate Sana sample post sent: {news_title}")
+                logging.info(f"Test sample post sent successfully with correct image: {news_title}")
 
         cur.close()
         conn.close()
