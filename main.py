@@ -84,7 +84,7 @@ def send_to_telegram(title, full_text, link, media_url, is_urgent=False):
     )
 
     try:
-        # محاولة إرسال مع صورة إذا توفرت وسائط مباشرة
+        # إرسال مع صورة إذا توفرت وسائط مباشرة
         if media_url and (media_url.endswith(('.jpg', '.png', '.jpeg', '.webp'))):
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
             payload = {
@@ -94,7 +94,6 @@ def send_to_telegram(title, full_text, link, media_url, is_urgent=False):
                 "parse_mode": "Markdown"
             }
         else:
-            # إرسال رسالة نصية في حال عدم وجود صورة مباشرة
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             payload = {
                 "chat_id": TELEGRAM_CHANNEL_ID,
@@ -122,11 +121,9 @@ def fetch_article_details(article_url):
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, 'html.parser')
             
-            # استخراج النص الكامل (يعتمد على بنية المقال داخل الموقع)
             content_div = soup.find('div', class_='entry-content') or soup.find('div', class_='post-content')
             full_text = content_div.get_text(strip=True) if content_div else "التفاصيل متاحة عبر الرابط الرسمي."
             
-            # استخراج رابط الصورة البارزة إن وجدت
             img_tag = soup.find('img', class_='wp-post-image') or (content_div.find('img') if content_div else None)
             media_url = img_tag.get('src') if img_tag else None
             
@@ -135,8 +132,8 @@ def fetch_article_details(article_url):
         logging.error(f"Error fetching article details from {article_url}: {e}")
     return "التفاصيل متاحة عبر الرابط الرسمي.", None
 
-# دالة فحص وتخزين الأخبار مع نشر أول خبر فوراً عند التشغيل
-def fetch_and_store_news(is_initial_run=False):
+# دالة فحص وتخزين الأخبار مع فرض نشر منشور فوري تجريبي
+def fetch_and_store_news():
     try:
         target_url = "https://sana.sy/en/tour-syria/"
         headers = {'User-Agent': 'Mozilla/5.0'}
@@ -149,8 +146,6 @@ def fetch_and_store_news(is_initial_run=False):
             conn = psycopg2.connect(DATABASE_URL, sslmode='require')
             cur = conn.cursor()
             
-            first_new_item = None
-
             for art in articles[:5]:
                 link_tag = art.find('a') if art.name != 'a' else art
                 if link_tag and link_tag.get('href'):
@@ -161,7 +156,6 @@ def fetch_and_store_news(is_initial_run=False):
                     exists = cur.fetchone()
                     
                     if not exists:
-                        # سحب النص الكامل والوسائط المرئية للمقال
                         full_text, media_url = fetch_article_details(news_link)
                         
                         cur.execute(
@@ -170,22 +164,35 @@ def fetch_and_store_news(is_initial_run=False):
                         )
                         conn.commit()
                         logging.info(f"New article saved to DB: {news_title}")
-                        
-                        if not first_new_item:
-                            first_new_item = (news_link, news_title, full_text, media_url)
             
-            # إذا كان تشغيلاً أولياً، نقوم بنشر أول خبر فوراً ليرى المستخدم شكله في القناة
-            if is_initial_run and first_new_item:
-                link, title, text, media = first_new_item
-                logging.info("Publishing the first immediate sample post...")
-                if send_to_telegram(title, text, link, media, is_urgent=False):
-                    cur.execute("UPDATE posted_news SET status = 'sent' WHERE news_url = %s", (link,))
-                    conn.commit()
-
             cur.close()
             conn.close()
     except Exception as e:
         logging.error(f"Error while fetching news: {e}")
+
+# دالة إرسال أول منشور معلق فوراً عند بدء التشغيل للمعاينة
+def send_immediate_sample_post():
+    try:
+        time.sleep(5) # الانتظار ثوانٍ قليلة ليتم تهيئة قاعدة البيانات أولاً
+        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+        cur = conn.cursor()
+        
+        cur.execute("SELECT id, news_url, title, full_text, media_url FROM posted_news WHERE status = 'pending' ORDER BY id ASC LIMIT 1")
+        row = cur.fetchone()
+        
+        if row:
+            news_id, news_link, news_title, full_text, media_url = row
+            logging.info("Sending immediate sample post for user review...")
+            
+            if send_to_telegram(news_title, full_text, news_link, media_url, is_urgent=False):
+                cur.execute("UPDATE posted_news SET status = 'sent' WHERE id = %s", (news_id,))
+                conn.commit()
+                logging.info("Immediate sample post sent successfully.")
+        
+        cur.close()
+        conn.close()
+    except Exception as e:
+        logging.error(f"Error sending immediate sample post: {e}")
 
 # دالة النشر المجدول (منشور واحد كل ساعة)
 def hourly_publisher_worker():
@@ -216,17 +223,19 @@ def hourly_publisher_worker():
 # دالة السكربت الدوري لجلب الأخبار في الخلفية (كل 15 دقيقة)
 def background_scraper_worker():
     while True:
-        fetch_and_store_news(is_initial_run=False)
+        fetch_and_store_news()
         time.sleep(900)
 
 # نقطة التشغيل الرئيسية
 if __name__ == "__main__":
     init_db()
+    fetch_and_store_news()
     
-    # جلب ونشر أول منشور فوراً عند بدء التشغيل لرؤية شكله
-    fetch_and_store_news(is_initial_run=True)
+    # إرسال منشور فوري تجريبي للمعاينة في خيط منفصل
+    sample_thread = threading.Thread(target=send_immediate_sample_post, daemon=True)
+    sample_thread.start()
     
-    # تشغيل مهام الخلفية في خيوط منفصلة
+    # تشغيل مهام الخلفية (السكربت الدوري + النشر كل ساعة)
     scraper_thread = threading.Thread(target=background_scraper_worker, daemon=True)
     scraper_thread.start()
     
