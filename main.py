@@ -61,20 +61,14 @@ def init_db():
     except Exception as e:
         logging.error(f"Error initializing database: {e}")
 
-# دالة لإصلاح الكلمات العربية الملتصقة نتيجة الروابط أو الوسوم
-def fix_stuck_arabic_text(text):
+# دالة آمنة لتنظيف النص واستخراج الكلمات بدون تكسير الحروف
+def clean_arabic_text(text):
     if not text:
         return ""
-    # إصلاح التصاق الحروف والكلمات الشائعة الناتجة عن الكود المصدري
-    text = re.sub(r'([؍-ؿ])([ا-ي])', r'\1 \2', text)
-    # إضافة مسافة قبل الكلمات الملتصقة الشائعة مثل بـ، لـ، في، مع، من، و... إذا لزم
-    text = re.sub(r'([ا-ي])(بالتعاون|ومشاركة|في|من|على|عن|إلى|مع)(?=[ا-ي])', r'\1 \2', text)
-    text = re.sub(r'([ا-ي])(معمؤسسة|بمحافظة|فيحمص|بحمص|بأن|إن)(?=[ا-ي])', r'\1 \2', text)
-    # إصلاح أي التلاصق بين حرف وكلمة عربية بشكل عام
-    text = re.sub(r'([\u0621-\u064A])(في|من|على|عن|إلى|مع|بـ|لـ|و)([ا-ي])', r'\1 \2 \3', text)
-    # تنظيف المسافات المزدوجة
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text
+    # إزالة الأسطر الفارغة المتعددة والمسافات الزائدة فقط دون المساس بالحروف
+    text = re.sub(r'[ \t]+', ' ', text)
+    text = re.sub(r'\n\s*\n', '\n\n', text)
+    return text.strip()
 
 # دالة إرسال المقال إلى تليجرام مع ضبط طول النص ليتوافق مع قيود تليجرام للصور
 def send_to_telegram(title, full_text, link, media_url, pub_date=""):
@@ -88,8 +82,8 @@ def send_to_telegram(title, full_text, link, media_url, pub_date=""):
     formatted_date = pub_date if pub_date else "غير محدد"
     safe_text = full_text if full_text else "تفاصيل الخبر متاحة عبر الرابط الرسمي أدناه."
     
-    safe_text = fix_stuck_arabic_text(safe_text)
-    title = fix_stuck_arabic_text(title)
+    safe_text = clean_arabic_text(safe_text)
+    title = clean_arabic_text(title)
 
     # اقتصاص النص لضمان عدم تجاوز الحد الأقصى لتعليق تليجرام (1024 حرفاً)
     if len(safe_text) > 550:
@@ -133,7 +127,7 @@ def send_to_telegram(title, full_text, link, media_url, pub_date=""):
         logging.error(f"Exception while sending to Telegram: {e}")
         return False
 
-# استخراج تفاصيل مقالات سانا مع فصل اسم المدينة وتصحيح التلاصق
+# استخراج تفاصيل مقالات سانا بشكل سليم تماماً
 def fetch_sana_article_details(article_url):
     try:
         session = get_robust_session()
@@ -154,10 +148,9 @@ def fetch_sana_article_details(article_url):
                 cleaned_paragraphs = []
                 for p in paragraphs:
                     p_text = p.get_text(strip=True)
-                    p_text = fix_stuck_arabic_text(p_text)
                     if not p_text:
                         continue
-                    if not location_prefix and ('-سانا' in p_text or 'سانا-' in p_text) and len(p_text) < 40:
+                    if not location_prefix and ('سانا' in p_text) and len(p_text) < 40:
                         location_prefix = p_text
                         for prefix_candidate in ["دمشق-سانا", "حلب-سانا", "حمص-سانا", "اللاذقية-سانا", "طرطوس-سانا", "حماة-سانا", "دير الزور-سانا", "الحسكة-سانا", "الرقة-سانا", "درعا-سانا", "السويداء-سانا", "القنيطرة-سانا", "إدلب-سانا"]:
                             if p_text.startswith(prefix_candidate):
@@ -183,7 +176,7 @@ def fetch_sana_article_details(article_url):
 
             img_tag = soup.find('img', class_='wp-post-image') or (content_div.find('img') if content_div else None)
             media_url = img_tag.get('src') if img_tag else None
-            return fix_stuck_arabic_text(full_text), media_url, pub_date
+            return clean_arabic_text(full_text), media_url, pub_date
     except Exception as e:
         logging.error(f"Error fetching Sana details: {e}")
     return "تفاصيل الخبر متاحة عبر الرابط الرسمي أدناه.", None, ""
@@ -206,7 +199,7 @@ def fetch_and_store_news():
                 link_tag = art.find('a') if art.name != 'a' else art
                 if link_tag and link_tag.get('href'):
                     news_link = link_tag['href']
-                    news_title = fix_stuck_arabic_text(link_tag.get_text(strip=True))
+                    news_title = clean_arabic_text(link_tag.get_text(strip=True))
                     
                     if not news_link or '/en/' in news_link:
                         continue
