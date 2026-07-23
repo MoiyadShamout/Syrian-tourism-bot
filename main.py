@@ -7,7 +7,6 @@ import requests
 from bs4 import BeautifulSoup
 import psycopg2
 from flask import Flask
-import re
 
 # إعداد السجلات (Logging)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -17,21 +16,12 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return {"status": "active", "message": "Syrian Tourism Fixed Bot is running smoothly!"}, 200
+    return {"status": "active", "message": "Syrian Tourism Ministry-Focused Bot is running smoothly!"}, 200
 
 # جلب الإعدادات من متغيرات البيئة
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID")
 DATABASE_URL = os.environ.get("DATABASE_URL")
-
-# دالة لإصلاح الكلمات الملتصقة تلقائياً (مثل اختتمتالغرفة -> اختتمت الغرفة)
-def fix_glued_words(text):
-    if not text:
-        return ""
-    # إضافة مسافة بين الحرف العربي الصغير والحرف الذي يليه إذا لزم الأمر أو تصحيح الكلمات الملاصقة
-    fixed = re.sub(r'([جحخهعغفقثصضطكمنتبلبيسشئؤأآإةوزظدذرزو])([ابتثجحخدذرزسشصضطظعغفقكلمنهويأإآؤئءا])', r'\1 \2', text)
-    # تنظيف إضافي للمسافات المزدوجة
-    return re.sub(r'\s+', ' ', fixed).strip()
 
 # دالة الاتصال بقاعدة البيانات وإعداد الجداول
 def init_db():
@@ -58,11 +48,11 @@ def init_db():
         conn.commit()
         cur.close()
         conn.close()
-        logging.info("Database initialized successfully with spacing fixes.")
+        logging.info("Database initialized successfully.")
     except Exception as e:
         logging.error(f"Error initializing database: {e}")
 
-# دالة إرسال المقال إلى تليجرام بالشكل المطلوب تماماً
+# دالة إرسال المقال إلى تليجرام بالتنسيق المطلوب
 def send_to_telegram(title, full_text, link, media_url, source_name="sana", pub_date=""):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
         logging.error("Telegram credentials are missing!")
@@ -76,16 +66,12 @@ def send_to_telegram(title, full_text, link, media_url, source_name="sana", pub_
         source_tag = "#وكالة_سانا"
 
     formatted_date = pub_date if pub_date else "غير محدد"
-    
-    # إصلاح العنوان والنص من أي كلمات ملتصقة
-    clean_title = fix_glued_words(title)
-    clean_text = fix_glued_words(full_text)
-    safe_text = clean_text if clean_text else "تفاصيل الخبر متاحة عبر الرابط الرسمي أدناه."
+    safe_text = full_text if full_text else "تفاصيل الخبر متاحة عبر الرابط الرسمي أدناه."
     
     caption = (
         f"🏛️ **مصدر المنشور:** {source_label}\n"
         f"📅 **تاريخ النشر:** {formatted_date}\n\n"
-        f"📌 **{clean_title}**\n\n"
+        f"📌 **{title}**\n\n"
         f"{safe_text[:650]}...\n\n"
         f"يمكنكم متابعة تفاصيل الخبر رسمياً عبر الرابط أدناه:\n"
         f"🔗 {link}\n\n"
@@ -154,7 +140,7 @@ def fetch_sana_article_details(article_url):
         logging.error(f"Error fetching Sana details: {e}")
     return "تفاصيل الخبر متاحة عبر الرابط الرسمي أدناه.", None, ""
 
-# استخراج تفاصيل موقع وزارة السياحة بدقة عالية
+# استخراج تفاصيل موقع وزارة السياحة
 def fetch_ministry_article_details(article_url):
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
@@ -162,13 +148,10 @@ def fetch_ministry_article_details(article_url):
         pub_date = ""
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, 'html.parser')
-            
-            # البحث عن التاريخ في موقع الوزارة
             time_tag = soup.find('time') or soup.find('span', class_='date') or soup.find('div', class_='news-date') or soup.find('span', class_='published')
             if time_tag:
                 pub_date = time_tag.get_text(strip=True)
 
-            # استخراج محتوى المقال من موقع الوزارة
             content_div = soup.find('div', class_='content') or soup.find('div', class_='article-body') or soup.find('article') or soup.find('main')
             if content_div:
                 paragraphs = content_div.find_all('p')
@@ -221,25 +204,22 @@ def fetch_and_store_news():
     except Exception as e:
         logging.error(f"Error fetching Sana news: {e}")
 
-    # 2. وزارة السياحة (بحث دقيق وفعال عن الروابط والعناوين)
+    # 2. وزارة السياحة
     try:
         ministry_url = "https://mots.gov.sy/"
         response = requests.get(ministry_url, headers=headers, timeout=15)
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
-            # البحث عن روابط الأخبار ضمن الأقسام المخصصة أو الروابط العامة في الصفحة الرئيسية للوزارة
             links = soup.find_all('a', href=True)
             
             for tag in links:
                 news_link = tag['href']
                 news_title = tag.get_text(strip=True)
                 
-                # تصفية الروابط لضمان جلب أخبار حقيقية وليست روابط تصفح عامة
                 if ('mots.gov.sy' in news_link or news_link.startswith('/')) and len(news_title) > 20:
                     if news_link.startswith('/'):
                         news_link = "https://mots.gov.sy" + news_link
                         
-                    # تجاهل الروابط الرئيسية أو صفحات الاتصال وتجنب التكرار
                     if 'index' in news_link or 'contact' in news_link:
                         continue
 
@@ -257,14 +237,14 @@ def fetch_and_store_news():
     cur.close()
     conn.close()
 
-# نشر عينات فورية (منشور فوري لمعاينة وزارة السياحة وسانا)
+# نشر عينة فورية حصراً من موقع وزارة السياحة للمعاينة
 def send_immediate_sample_posts():
     try:
         time.sleep(5)
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
         cur = conn.cursor()
         
-        # 1. إرسال عينة فورية لمعاينة موقع وزارة السياحة
+        # جلب ونشر خبر فوري من موقع وزارة السياحة فقط
         cur.execute("SELECT id, news_url, title, full_text, media_url, source, pub_date FROM posted_news WHERE status = 'pending' AND source = 'ministry' ORDER BY id ASC LIMIT 1")
         row_min = cur.fetchone()
         if row_min:
@@ -273,24 +253,15 @@ def send_immediate_sample_posts():
                 cur.execute("UPDATE posted_news SET status = 'sent' WHERE id = %s", (news_id,))
                 conn.commit()
 
-        # 2. إرسال عينة فورية لمعاينة سانا
-        cur.execute("SELECT id, news_url, title, full_text, media_url, source, pub_date FROM posted_news WHERE status = 'pending' AND source = 'sana' ORDER BY id ASC LIMIT 1")
-        row_sana = cur.fetchone()
-        if row_sana:
-            news_id, news_link, news_title, full_text, media_url, source_name, pub_date = row_sana
-            if send_to_telegram(news_title, full_text, news_link, media_url, source_name, pub_date):
-                cur.execute("UPDATE posted_news SET status = 'sent' WHERE id = %s", (news_id,))
-                conn.commit()
-
         cur.close()
         conn.close()
-        logging.info("Immediate preview samples sent.")
+        logging.info("Immediate Ministry preview sample sent.")
     except Exception as e:
-        logging.error(f"Error sending immediate sample posts: {e}")
+        logging.error(f"Error sending immediate sample post: {e}")
 
 # عامل النشر الدوري كل نصف ساعة بالتناوب بين المصدرين
 def alternating_publisher_worker():
-    last_source = 'sana'
+    last_source = 'ministry'  # لضمان أن يبدأ النشر الدوري تليها من سانا
     while True:
         try:
             time.sleep(1800)  # كل 30 دقيقة
