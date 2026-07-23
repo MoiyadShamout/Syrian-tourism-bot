@@ -128,7 +128,6 @@ def fetch_sana_article_details(article_url):
             if time_tag:
                 pub_date = time_tag.get_text(strip=True)
 
-            # البحث عن الصورة البارزة الرسمية المعتمدة في رأس المقال
             img_tag = soup.find('img', class_='wp-post-image')
             if not img_tag:
                 featured_div = soup.find('div', class_='entry-featured') or soup.find('div', class_='post-thumbnail')
@@ -216,15 +215,18 @@ def fetch_and_store_news():
     except Exception as e:
         logging.error(f"Error fetching Sana news: {e}")
 
-# نشر عينة فورية لإعادة إرسال أحدث مقال وتجربة الصورة فوراً عند التشغيل
+# إعادة ضبط أحدث خبر وإجباره على الإرسال الفوري للتحقق من الصورة
 def send_immediate_sample_posts():
     try:
-        time.sleep(6)
+        time.sleep(5)
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
         cur = conn.cursor()
         
-        # اختيار أحدث مقال مخزّن بغض النظر عن حالته لتجربته فوراً
-        cur.execute("SELECT id, news_url, title, full_text, media_url, pub_date FROM posted_news WHERE source = 'sana' ORDER BY id DESC LIMIT 1")
+        # تحويل حالة أحدث خبر إلى pending لضمان إرساله فوراً كاختبار
+        cur.execute("UPDATE posted_news SET status = 'pending' WHERE id = (SELECT id FROM posted_news WHERE source = 'sana' ORDER BY id DESC LIMIT 1)")
+        conn.commit()
+
+        cur.execute("SELECT id, news_url, title, full_text, media_url, pub_date FROM posted_news WHERE status = 'pending' AND source = 'sana' ORDER BY id ASC LIMIT 1")
         row = cur.fetchone()
 
         if row:
@@ -232,7 +234,7 @@ def send_immediate_sample_posts():
             if send_to_telegram(news_title, full_text, news_link, media_url, pub_date):
                 cur.execute("UPDATE posted_news SET status = 'sent' WHERE id = %s", (news_id,))
                 conn.commit()
-                logging.info(f"Test sample post sent successfully with correct image: {news_title}")
+                logging.info(f"Immediate sample post forced and sent: {news_title}")
 
         cur.close()
         conn.close()
