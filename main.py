@@ -23,7 +23,7 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-# دالة الاتصال بقاعدة البيانات وتحديث الأعمدة تلقائياً
+# دالة الاتصال بقاعدة البيانات وتنظيف الروابط الإنجليزية القديمة
 def init_db():
     try:
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
@@ -38,14 +38,18 @@ def init_db():
         ''')
         cur.execute("ALTER TABLE posted_news ADD COLUMN IF NOT EXISTS full_text TEXT;")
         cur.execute("ALTER TABLE posted_news ADD COLUMN IF NOT EXISTS media_url TEXT;")
+        
+        # حذف أي روابط قديمة تحتوي على /en/ لضمان عدم ظهور أي محتوى إنجليزي
+        cur.execute("DELETE FROM posted_news WHERE news_url LIKE '%/en/%';")
+        
         conn.commit()
         cur.close()
         conn.close()
-        logging.info("Database initialized and updated successfully.")
+        logging.info("Database initialized and filtered for Arabic content successfully.")
     except Exception as e:
         logging.error(f"Error initializing database: {e}")
 
-# دالة إرسال الوسائط أو النصوص إلى تليجرام باللغة العربية
+# دالة إرسال المقال كاملاً إلى تليجرام باللغة العربية
 def send_to_telegram(title, full_text, link, media_url, is_urgent=False):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
         logging.error("Telegram credentials are missing!")
@@ -75,11 +79,13 @@ def send_to_telegram(title, full_text, link, media_url, is_urgent=False):
         header = "أفق الاستثمار والمشاريع السياحية"
 
     safe_text = full_text if full_text else "التفاصيل متاحة عبر الرابط الرسمي."
+    
+    # تم زيادة الحد الأقصى لعرض النص ليكون المقال كاملاً قدر الإمكان (تليجرام يسمح حتى 1024 حرفاً للتعليق على الصور)
     caption = (
         f"{icon} {header}\n\n"
         f"📌 {title}\n\n"
-        f"{safe_text[:500]}...\n\n"
-        f"🔗 قراءة التفاصيل والخبر كاملاً من الموقع الرسمي:\n{link}\n\n"
+        f"{safe_text[:900]}...\n\n"
+        f"🔗 قراءة الخبر كاملاً من الموقع الرسمي:\n{link}\n\n"
         f"{category_tag} #وزارة_السياحة #سانا"
     )
 
@@ -110,14 +116,25 @@ def send_to_telegram(title, full_text, link, media_url, is_urgent=False):
         logging.error(f"Exception while sending to Telegram: {e}")
         return False
 
+# دالة جلب النص الكامل للمقال من الصفحة العربية
 def fetch_article_details(article_url):
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
         resp = requests.get(article_url, headers=headers, timeout=10)
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, 'html.parser')
-            content_div = soup.find('div', class_='entry-content') or soup.find('div', class_='post-content')
-            full_text = content_div.get_text(strip=True) if content_div else "التفاصيل متاحة عبر الرابط الرسمي."
+            # استخراج محتوى المقال الكامل بناءً على بنية موقع سانا العربي
+            content_div = soup.find('div', class_='entry-content') or soup.find('div', class_='post-content') or soup.find('div', class_='single-content')
+            
+            if content_div:
+                # جمع كافة فقرات النص لضمان الحصول على المقال كاملاً
+                paragraphs = content_div.find_all('p')
+                full_text = "\n".join([p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True)])
+                if not full_text:
+                    full_text = content_div.get_text(strip=True)
+            else:
+                full_text = "التفاصيل متاحة عبر الرابط الرسمي."
+
             img_tag = soup.find('img', class_='wp-post-image') or (content_div.find('img') if content_div else None)
             media_url = img_tag.get('src') if img_tag else None
             return full_text, media_url
@@ -127,8 +144,7 @@ def fetch_article_details(article_url):
 
 def fetch_and_store_news():
     try:
-        # تم تغيير الرابط إلى النسخة العربية المخصصة للسياحة في موقع سانا
-        target_url = "https://sana.sy/?cat=23" # قسم السياحة باللغة العربية في سانا
+        target_url = "https://sana.sy/tourism/"
         headers = {'User-Agent': 'Mozilla/5.0'}
         response = requests.get(target_url, headers=headers, timeout=15)
         
@@ -145,6 +161,9 @@ def fetch_and_store_news():
                     news_link = link_tag['href']
                     news_title = link_tag.get_text(strip=True)
                     
+                    if '/en/' in news_link:
+                        continue
+                        
                     cur.execute("SELECT id FROM posted_news WHERE news_url = %s", (news_link,))
                     exists = cur.fetchone()
                     
@@ -158,7 +177,7 @@ def fetch_and_store_news():
             cur.close()
             conn.close()
     except Exception as e:
-        logging.error(f"Error while fetching news: {e}")
+        logging.error(f"Error while fetching Arabic news: {e}")
 
 def send_immediate_sample_post():
     try:
@@ -175,7 +194,7 @@ def send_immediate_sample_post():
                 conn.commit()
                 logging.info("Immediate Arabic sample post sent successfully.")
         else:
-            logging.info("No pending news found for immediate post.")
+            logging.info("No pending Arabic news found for immediate post.")
         cur.close()
         conn.close()
     except Exception as e:
