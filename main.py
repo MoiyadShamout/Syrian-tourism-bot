@@ -18,17 +18,17 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return {"status": "active", "message": "Syrian Tourism Robust Bot is running smoothly!"}, 200
+    return {"status": "active", "message": "Syrian Tourism Ministry-Dedicated Bot is running smoothly!"}, 200
 
 # جلب الإعدادات من متغيرات البيئة
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-# إعداد جلسة طلبات مع إعادة محاولة تلقائية لتجنب أخطاء الاتصال المفاجئة
+# جلسة طلبات قوية مع دعم إعادة المحاولة
 def get_robust_session():
     session = requests.Session()
-    retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+    retries = Retry(total=5, backoff_factor=2, status_forcelist=[500, 502, 503, 504])
     session.mount('https://', HTTPAdapter(max_retries=retries))
     session.mount('http://', HTTPAdapter(max_retries=retries))
     return session
@@ -127,7 +127,7 @@ def send_to_telegram(title, full_text, link, media_url, source_name="sana", pub_
 def fetch_sana_article_details(article_url):
     try:
         session = get_robust_session()
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        headers = {'User-Agent': 'Mozilla/5.0'}
         resp = session.get(article_url, headers=headers, timeout=20)
         pub_date = ""
         if resp.status_code == 200:
@@ -149,15 +149,15 @@ def fetch_sana_article_details(article_url):
             media_url = img_tag.get('src') if img_tag else None
             return full_text, media_url, pub_date
     except Exception as e:
-        logging.error(f"Error fetching Sana details from {article_url}: {e}")
+        logging.error(f"Error fetching Sana details: {e}")
     return "تفاصيل الخبر متاحة عبر الرابط الرسمي أدناه.", None, ""
 
-# استخراج تفاصيل موقع وزارة السياحة مع معالجة بطء الخادم
+# استخراج تفاصيل موقع وزارة السياحة
 def fetch_ministry_article_details(article_url):
     try:
         session = get_robust_session()
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-        resp = session.get(article_url, headers=headers, timeout=25)
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        resp = session.get(article_url, headers=headers, timeout=30)
         pub_date = ""
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, 'html.parser')
@@ -180,13 +180,13 @@ def fetch_ministry_article_details(article_url):
                 media_url = "https://mots.gov.sy" + media_url
             return full_text, media_url, pub_date
     except Exception as e:
-        logging.error(f"Error fetching Ministry details from {article_url}: {e}")
+        logging.error(f"Error fetching Ministry details: {e}")
     return "تفاصيل الخبر متاحة عبر الرابط الرسمي أدناه.", None, ""
 
 # جلب وتخزين الأخبار من المصدرين
 def fetch_and_store_news():
     session = get_robust_session()
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    headers = {'User-Agent': 'Mozilla/5.0'}
     conn = psycopg2.connect(DATABASE_URL, sslmode='require')
     cur = conn.cursor()
 
@@ -218,10 +218,10 @@ def fetch_and_store_news():
     except Exception as e:
         logging.error(f"Error fetching Sana news: {e}")
 
-    # 2. وزارة السياحة مع زيادة مهلة الانتظار للتعامل مع بطء الخادم
+    # 2. وزارة السياحة
     try:
         ministry_url = "https://mots.gov.sy/"
-        response = session.get(ministry_url, headers=headers, timeout=25)
+        response = session.get(ministry_url, headers=headers, timeout=30)
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
             links = soup.find_all('a', href=True)
@@ -230,7 +230,7 @@ def fetch_and_store_news():
                 news_link = tag['href']
                 news_title = tag.get_text(strip=True)
                 
-                if ('mots.gov.sy' in news_link or news_link.startswith('/')) and len(news_title) > 20:
+                if ('mots.gov.sy' in news_link or news_link.startswith('/')) and len(news_title) > 15:
                     if news_link.startswith('/'):
                         news_link = "https://mots.gov.sy" + news_link
                         
@@ -251,19 +251,47 @@ def fetch_and_store_news():
     cur.close()
     conn.close()
 
-# نشر عينة فورية حصراً من موقع وزارة السياحة للمعاينة
+# نشر عينة فورية حصراً من موقع وزارة السياحة (مع جلب مباشر إذا كانت القاعدة فارغة للموقع)
 def send_immediate_sample_posts():
     try:
-        time.sleep(6)
+        time.sleep(5)
+        session = get_robust_session()
+        headers = {'User-Agent': 'Mozilla/5.0'}
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
         cur = conn.cursor()
         
-        # محاولة جلب خبر من وزارة السياحة؛ وإذا لم يتوفر مؤقتاً بسبب بطء الموقع، يجلب من سانا كبديل فوري مؤقت لضمان المعاينة
+        # البحث عن خبر معلق لوزارة السياحة في القاعدة
         cur.execute("SELECT id, news_url, title, full_text, media_url, source, pub_date FROM posted_news WHERE status = 'pending' AND source = 'ministry' ORDER BY id ASC LIMIT 1")
         row = cur.fetchone()
         
+        # إذا لم يكن مخزناً بعد، نقوم بسحبه مباشرة وبشكل فوري الآن من موقع الوزارة لضمان إرساله فوراً
         if not row:
-            cur.execute("SELECT id, news_url, title, full_text, media_url, source, pub_date FROM posted_news WHERE status = 'pending' AND source = 'sana' ORDER BY id ASC LIMIT 1")
+            try:
+                ministry_url = "https://mots.gov.sy/"
+                resp = session.get(ministry_url, headers=headers, timeout=30)
+                if resp.status_code == 200:
+                    soup = BeautifulSoup(resp.text, 'html.parser')
+                    for tag in soup.find_all('a', href=True):
+                        news_link = tag['href']
+                        news_title = tag.get_text(strip=True)
+                        if ('mots.gov.sy' in news_link or news_link.startswith('/')) and len(news_title) > 15:
+                            if news_link.startswith('/'):
+                                news_link = "https://mots.gov.sy" + news_link
+                            if 'index' in news_link or 'contact' in news_link:
+                                continue
+                            
+                            full_text, media_url, pub_date = fetch_ministry_article_details(news_link)
+                            cur.execute(
+                                "INSERT INTO posted_news (news_url, title, full_text, media_url, source, pub_date, status) VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (news_url) DO NOTHING",
+                                (news_link, news_title, full_text, media_url, 'ministry', pub_date, 'pending')
+                            )
+                            conn.commit()
+                            break
+            except Exception as e:
+                logging.error(f"Direct fetch ministry immediate error: {e}")
+
+            # إعادة محاولة الجلب من القاعدة بعد الإدخال المباشر
+            cur.execute("SELECT id, news_url, title, full_text, media_url, source, pub_date FROM posted_news WHERE status = 'pending' AND source = 'ministry' ORDER BY id ASC LIMIT 1")
             row = cur.fetchone()
 
         if row:
@@ -274,9 +302,9 @@ def send_immediate_sample_posts():
 
         cur.close()
         conn.close()
-        logging.info("Immediate preview sample processed.")
+        logging.info("Immediate Ministry sample post processed successfully.")
     except Exception as e:
-        logging.error(f"Error sending immediate sample post: {e}")
+        logging.error(f"Error in sending immediate ministry sample: {e}")
 
 # عامل النشر الدوري كل نصف ساعة بالتناوب بين المصدرين
 def alternating_publisher_worker():
