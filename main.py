@@ -49,7 +49,7 @@ def init_db():
     except Exception as e:
         logging.error(f"Error initializing database: {e}")
 
-# دالة إرسال المقال كاملاً إلى تليجرام باللغة العربية
+# دالة إرسال المقال إلى تليجرام باللغة العربية مع الاستغلال الأقصى للحروف والجملة المطلوبة
 def send_to_telegram(title, full_text, link, media_url, is_urgent=False):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
         logging.error("Telegram credentials are missing!")
@@ -80,12 +80,13 @@ def send_to_telegram(title, full_text, link, media_url, is_urgent=False):
 
     safe_text = full_text if full_text else "التفاصيل متاحة عبر الرابط الرسمي."
     
-    # تم زيادة الحد الأقصى لعرض النص ليكون المقال كاملاً قدر الإمكان (تليجرام يسمح حتى 1024 حرفاً للتعليق على الصور)
+    # استغلال الحد الأقصى المسموح به في تليجرام (1024 حرفاً للصور)، تم اقتطاع النص بـ 750 حرفاً لتتسع الرسالة بالكامل مع الروابط والوسوم
     caption = (
         f"{icon} {header}\n\n"
         f"📌 {title}\n\n"
-        f"{safe_text[:900]}...\n\n"
-        f"🔗 قراءة الخبر كاملاً من الموقع الرسمي:\n{link}\n\n"
+        f"{safe_text[:750]}...\n\n"
+        f"للمزيد أضغط على الرابط في الأسفل\n"
+        f"🔗 {link}\n\n"
         f"{category_tag} #وزارة_السياحة #سانا"
     )
 
@@ -123,11 +124,9 @@ def fetch_article_details(article_url):
         resp = requests.get(article_url, headers=headers, timeout=10)
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, 'html.parser')
-            # استخراج محتوى المقال الكامل بناءً على بنية موقع سانا العربي
             content_div = soup.find('div', class_='entry-content') or soup.find('div', class_='post-content') or soup.find('div', class_='single-content')
             
             if content_div:
-                # جمع كافة فقرات النص لضمان الحصول على المقال كاملاً
                 paragraphs = content_div.find_all('p')
                 full_text = "\n".join([p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True)])
                 if not full_text:
