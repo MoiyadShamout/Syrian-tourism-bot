@@ -23,25 +23,30 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-# دالة الاتصال بقاعدة البيانات
+# دالة الاتصال بقاعدة البيانات وتحديث الأعمدة تلقائياً
 def init_db():
     try:
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
         cur = conn.cursor()
+        
+        # إنشاء الجدول أساساً إن لم يكن موجوداً
         cur.execute('''
             CREATE TABLE IF NOT EXISTS posted_news (
                 id SERIAL PRIMARY KEY,
                 news_url TEXT UNIQUE,
                 title TEXT,
-                full_text TEXT,
-                media_url TEXT,
                 status TEXT DEFAULT 'pending'
             )
         ''')
+        
+        # إضافة الأعمدة الجديدة بأمان إذا كانت مفقودة في الجداول القديمة
+        cur.execute("ALTER TABLE posted_news ADD COLUMN IF NOT EXISTS full_text TEXT;")
+        cur.execute("ALTER TABLE posted_news ADD COLUMN IF NOT EXISTS media_url TEXT;")
+        
         conn.commit()
         cur.close()
         conn.close()
-        logging.info("Database initialized successfully.")
+        logging.info("Database initialized and updated successfully.")
     except Exception as e:
         logging.error(f"Error initializing database: {e}")
 
@@ -173,6 +178,7 @@ def send_immediate_sample_post():
             if send_to_telegram(news_title, full_text, news_link, media_url, is_urgent=False):
                 cur.execute("UPDATE posted_news SET status = 'sent' WHERE id = %s", (news_id,))
                 conn.commit()
+                logging.info("Immediate sample post sent successfully.")
         cur.close()
         conn.close()
     except Exception as e:
@@ -202,7 +208,6 @@ def background_scraper_worker():
         fetch_and_store_news()
         time.sleep(900)
 
-# تشغيل المهام تلقائياً عند تحميل الملف بواسطة Gunicorn أو Flask
 def start_background_tasks():
     init_db()
     fetch_and_store_news()
@@ -211,7 +216,6 @@ def start_background_tasks():
     threading.Thread(target=background_scraper_worker, daemon=True).start()
     threading.Thread(target=hourly_publisher_worker, daemon=True).start()
 
-# تنفيذ دالة بدء المهام فور استيراد الملف
 start_background_tasks()
 
 if __name__ == "__main__":
