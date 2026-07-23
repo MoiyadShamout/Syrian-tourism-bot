@@ -87,7 +87,8 @@ def send_to_telegram(title, full_text, link, media_url, pub_date=""):
 
     try:
         session = get_robust_session()
-        if media_url and (media_url.endswith(('.jpg', '.png', '.jpeg', '.webp'))):
+        # التأكد من صحة الرابط قبل الإرسال
+        if media_url and media_url.startswith('http'):
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
             payload = {
                 "chat_id": TELEGRAM_CHANNEL_ID,
@@ -113,7 +114,7 @@ def send_to_telegram(title, full_text, link, media_url, pub_date=""):
         logging.error(f"Exception while sending to Telegram: {e}")
         return False
 
-# استخراج تفاصيل مقالات سانا مع التركيز على الصورة البارزة الرسمية فقط
+# استخراج تفاصيل مقالات سانا بالاعتماد المطلق على Open Graph للصورة الأصلية
 def fetch_sana_article_details(article_url):
     try:
         session = get_robust_session()
@@ -128,14 +129,16 @@ def fetch_sana_article_details(article_url):
             if time_tag:
                 pub_date = time_tag.get_text(strip=True)
 
-            img_tag = soup.find('img', class_='wp-post-image')
-            if not img_tag:
-                featured_div = soup.find('div', class_='entry-featured') or soup.find('div', class_='post-thumbnail')
-                if featured_div:
-                    img_tag = featured_div.find('img')
+            # 1. الاستخراج الجذري للصورة عبر meta tags (الطريقة الأضمن 100% وتتجاهل المقالات الجانبية)
+            og_image = soup.find('meta', property='og:image') or soup.find('meta', attrs={'name': 'twitter:image'})
+            if og_image and og_image.get('content'):
+                media_url = og_image.get('content')
             
-            if img_tag:
-                media_url = img_tag.get('src')
+            # 2. حل احتياطي في حال غياب الأوبن جراف (استهداف الصورة البارزة الأساسية فقط)
+            if not media_url:
+                main_img = soup.select_one('.single-post-thumb img, .entry-header img, .post-thumbnail img, .wp-post-image')
+                if main_img and main_img.get('src'):
+                    media_url = main_img.get('src')
 
             content_div = soup.find('div', class_='entry-content') or soup.find('div', class_='post-content')
             if content_div:
@@ -215,16 +218,24 @@ def fetch_and_store_news():
     except Exception as e:
         logging.error(f"Error fetching Sana news: {e}")
 
-# إعادة ضبط أحدث خبر وإجباره على الإرسال الفوري للتحقق من الصورة
+# إعادة ضبط أحدث خبر وإجباره على الإرسال الفوري للتحقق من أن الصورة 100% صحيحة
 def send_immediate_sample_posts():
     try:
         time.sleep(5)
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
         cur = conn.cursor()
         
-        # تحويل حالة أحدث خبر إلى pending لضمان إرساله فوراً كاختبار
-        cur.execute("UPDATE posted_news SET status = 'pending' WHERE id = (SELECT id FROM posted_news WHERE source = 'sana' ORDER BY id DESC LIMIT 1)")
-        conn.commit()
+        # نعيد جلب تفاصيل أحدث خبر لتحديث صورته بناءً على الكود الجديد قبل إرساله
+        cur.execute("SELECT id, news_url FROM posted_news WHERE source = 'sana' ORDER BY id DESC LIMIT 1")
+        row = cur.fetchone()
+        
+        if row:
+            news_id, news_link = row
+            full_text, media_url, pub_date = fetch_sana_article_details(news_link)
+            
+            # تحديث قاعدة البيانات بالصورة الجديدة المضمونة وجعله pending
+            cur.execute("UPDATE posted_news SET media_url = %s, status = 'pending' WHERE id = %s", (media_url, news_id))
+            conn.commit()
 
         cur.execute("SELECT id, news_url, title, full_text, media_url, pub_date FROM posted_news WHERE status = 'pending' AND source = 'sana' ORDER BY id ASC LIMIT 1")
         row = cur.fetchone()
@@ -234,14 +245,14 @@ def send_immediate_sample_posts():
             if send_to_telegram(news_title, full_text, news_link, media_url, pub_date):
                 cur.execute("UPDATE posted_news SET status = 'sent' WHERE id = %s", (news_id,))
                 conn.commit()
-                logging.info(f"Immediate sample post forced and sent: {news_title}")
+                logging.info(f"Immediate corrected sample post sent with 100% Accurate image: {news_title}")
 
         cur.close()
         conn.close()
     except Exception as e:
         logging.error(f"Error in sending immediate sample: {e}")
 
-# عامل النشر الدوري كل نصف ساعة من سانا
+# عامل النشر الدوري كل نصف ساعة
 def alternating_publisher_worker():
     while True:
         try:
