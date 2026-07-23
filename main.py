@@ -60,42 +60,29 @@ def init_db():
     except Exception as e:
         logging.error(f"Error initializing database: {e}")
 
-# تحديد التحية والإيموجي المناسب حسب الوقت
-def get_time_greeting():
-    current_hour = datetime.now().hour
-    if 5 <= current_hour < 12:
-        return "صباح الخير 🌅"
-    elif 12 <= current_hour < 17:
-        return "طاب مساؤكم ☀️"
-    elif 17 <= current_hour < 21:
-        return "مساء الخير 🌇"
-    else:
-        return "طابت ليلتكم 🌙"
-
-# دالة إرسال المقال إلى تليجرام بدقة
+# دالة إرسال المقال إلى تليجرام بالتنسيق الكلاسيكي
 def send_to_telegram(title, full_text, link, media_url, pub_date=""):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
         logging.error("Telegram credentials are missing!")
         return False
     
-    greeting = get_time_greeting()
     source_label = "وكالة الأنباء السورية - سانا (قسم السياحة)"
     source_tag = "#وكالة_سانا"
 
     formatted_date = pub_date if pub_date else "غير محدد"
     safe_text = full_text if full_text else "تفاصيل الخبر متاحة عبر الرابط الرسمي أدناه."
 
-    if len(safe_text) > 500:
-        safe_text = safe_text[:500] + "..."
+    if len(safe_text) > 550:
+        safe_text = safe_text[:550] + "..."
 
+    # التنسيق القديم المطلوب تماماً
     caption = (
-        f"{greeting}\n\n"
-        f"🔴 {title}\n\n"
+        f"مصدر المنشور: {source_label}\n"
+        f"تاريخ النشر: {formatted_date}\n\n"
+        f"{title}\n\n"
         f"{safe_text}\n\n"
-        f"📅 تاريخ النشر: {formatted_date}\n"
-        f"🔗 يمكنكم متابعة تفاصيل الخبر رسمياً عبر الرابط أدناه:\n"
+        f"يمكنكم متابعة تفاصيل الخبر رسمياً عبر الرابط أدناه:\n"
         f"{link}\n\n"
-        f"مصدَر المنشور: {source_label}\n"
         f"#السياحة_السورية {source_tag} #سوريا"
     )
 
@@ -127,7 +114,7 @@ def send_to_telegram(title, full_text, link, media_url, pub_date=""):
         logging.error(f"Exception while sending to Telegram: {e}")
         return False
 
-# استخراج تفاصيل مقالات سانا بالاعتماد المطلق على Open Graph للصورة الأصلية
+# استخراج تفاصيل مقالات سانا 
 def fetch_sana_article_details(article_url):
     try:
         session = get_robust_session()
@@ -249,7 +236,7 @@ def send_immediate_sample_posts():
     except Exception as e:
         logging.error(f"Error in sending immediate sample: {e}")
 
-# عامل النشر الدوري (نظام الأولوية والأحدث)
+# عامل النشر الدوري (نظام الأولوية والأحدث مستمر كما اتفقنا)
 def alternating_publisher_worker():
     while True:
         try:
