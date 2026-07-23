@@ -18,7 +18,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return {"status": "active", "message": "Syrian Tourism Safe Text Bot is running smoothly!"}, 200
+    return {"status": "active", "message": "Syrian Tourism Clean Bot is running smoothly!"}, 200
 
 # جلب الإعدادات من متغيرات البيئة
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -53,7 +53,8 @@ def init_db():
         cur.execute("ALTER TABLE posted_news ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'sana';")
         cur.execute("ALTER TABLE posted_news ADD COLUMN IF NOT EXISTS pub_date TEXT DEFAULT '';")
         
-        cur.execute("DELETE FROM posted_news WHERE news_url LIKE '%/en/%';")
+        # تنظيف أي روابط بريدية أو أجنبية سابقة خاطئة من القاعدة
+        cur.execute("DELETE FROM posted_news WHERE news_url LIKE '%/en/%' OR news_url LIKE '%mailto:%' OR title LIKE '%@%';")
         
         conn.commit()
         cur.close()
@@ -62,7 +63,7 @@ def init_db():
     except Exception as e:
         logging.error(f"Error initializing database: {e}")
 
-# دالة إرسال المقال إلى تليجرام بنص عادي وآمن (بدون Markdown لتفادي الأخطاء نهائياً)
+# دالة إرسال المقال إلى تليجرام بنص عادي وآمن
 def send_to_telegram(title, full_text, link, media_url, source_name="sana", pub_date=""):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
         logging.error("Telegram credentials are missing!")
@@ -78,7 +79,6 @@ def send_to_telegram(title, full_text, link, media_url, source_name="sana", pub_
     formatted_date = pub_date if pub_date else "غير محدد"
     safe_text = full_text if full_text else "تفاصيل الخبر متاحة عبر الرابط الرسمي أدناه."
     
-    # رسالة بنص عادي بالكامل خالية من أي ترميز معقد يسبب مشاكل لتليجرام
     caption = (
         f"مصدر المنشور: {source_label}\n"
         f"تاريخ النشر: {formatted_date}\n\n"
@@ -146,9 +146,9 @@ def fetch_sana_article_details(article_url):
         logging.error(f"Error fetching Sana details: {e}")
     return "تفاصيل الخبر متاحة عبر الرابط الرسمي أدناه.", None, ""
 
-# استخراج تفاصيل موقع وزارة السياحة مع تصفية الروابط غير الصالحة
+# استخراج تفاصيل موقع وزارة السياحة مع فلترة صارمة لعناوين البريد والروابط الفارغة
 def fetch_ministry_article_details(article_url):
-    if not article_url or article_url.startswith('mailto:') or article_url.startswith('tel:'):
+    if not article_url or '@' in article_url or article_url.startswith('mailto:') or article_url.startswith('tel:'):
         return None, None, ""
     try:
         session = get_robust_session()
@@ -179,7 +179,7 @@ def fetch_ministry_article_details(article_url):
         logging.error(f"Error fetching Ministry details: {e}")
     return "تفاصيل الخبر متاحة عبر الرابط الرسمي أدناه.", None, ""
 
-# جلب وتخزين الأخبار مع التحقق من الروابط
+# جلب وتخزين الأخبار مع الفلترة التامة للمحتوى الحقيقي
 def fetch_and_store_news():
     session = get_robust_session()
     headers = {'User-Agent': 'Mozilla/5.0'}
@@ -200,21 +200,22 @@ def fetch_and_store_news():
                     news_link = link_tag['href']
                     news_title = link_tag.get_text(strip=True)
                     
-                    if not news_link or news_link.startswith('mailto:') or '/en/' in news_link:
+                    if not news_link or '@' in news_link or news_link.startswith('mailto:') or '/en/' in news_link:
                         continue
                         
                     cur.execute("SELECT id FROM posted_news WHERE news_url = %s", (news_link,))
                     if not cur.fetchone():
                         full_text, media_url, pub_date = fetch_sana_article_details(news_link)
-                        cur.execute(
-                            "INSERT INTO posted_news (news_url, title, full_text, media_url, source, pub_date, status) VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                            (news_link, news_title, full_text, media_url, 'sana', pub_date, 'pending')
-                        )
-                        conn.commit()
+                        if full_text:
+                            cur.execute(
+                                "INSERT INTO posted_news (news_url, title, full_text, media_url, source, pub_date, status) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                                (news_link, news_title, full_text, media_url, 'sana', pub_date, 'pending')
+                            )
+                            conn.commit()
     except Exception as e:
         logging.error(f"Error fetching Sana news: {e}")
 
-    # 2. وزارة السياحة
+    # 2. وزارة السياحة (مع فلترة دقيقة لضمان عدم جلب الإيميلات أو الروابط الفارغة)
     try:
         ministry_url = "https://mots.gov.sy/"
         response = session.get(ministry_url, headers=headers, timeout=30)
@@ -226,20 +227,25 @@ def fetch_and_store_news():
                 news_link = tag['href']
                 news_title = tag.get_text(strip=True)
                 
-                if not news_link or news_link.startswith('mailto:') or news_link.startswith('tel:'):
+                # استبعاد عناوين الإيميل، الهواتف، والروابط غير المقالية
+                if not news_link or '@' in news_link or news_link.startswith('mailto:') or news_link.startswith('tel:'):
+                    continue
+                if '@' in news_title or 'info@' in news_title:
                     continue
                 
-                if ('mots.gov.sy' in news_link or news_link.startswith('/')) and len(news_title) > 15:
+                # البحث عن الروابط التي تخص المقالات أو التفاصيل الداخلية ضمن الموقع
+                if ('mots.gov.sy' in news_link or news_link.startswith('/')) and len(news_title) > 20:
                     if news_link.startswith('/'):
                         news_link = "https://mots.gov.sy" + news_link
                         
-                    if 'index' in news_link or 'contact' in news_link:
+                    if any(x in news_link for x in ['index', 'contact', 'about', 'sitemap', 'login']):
                         continue
 
                     cur.execute("SELECT id FROM posted_news WHERE news_url = %s", (news_link,))
                     if not cur.fetchone():
                         full_text, media_url, pub_date = fetch_ministry_article_details(news_link)
-                        if full_text:
+                        # التأكد من أن النص المستخرج ليس هو إيميل أو محتوى فارغ
+                        if full_text and '@' not in full_text and len(full_text) > 30:
                             cur.execute(
                                 "INSERT INTO posted_news (news_url, title, full_text, media_url, source, pub_date, status) VALUES (%s, %s, %s, %s, %s, %s, %s)",
                                 (news_link, news_title, full_text, media_url, 'ministry', pub_date, 'pending')
@@ -272,16 +278,18 @@ def send_immediate_sample_posts():
                     for tag in soup.find_all('a', href=True):
                         news_link = tag['href']
                         news_title = tag.get_text(strip=True)
-                        if not news_link or news_link.startswith('mailto:') or news_link.startswith('tel:'):
+                        if not news_link or '@' in news_link or news_link.startswith('mailto:') or news_link.startswith('tel:'):
                             continue
-                        if ('mots.gov.sy' in news_link or news_link.startswith('/')) and len(news_title) > 15:
+                        if '@' in news_title or 'info@' in news_title:
+                            continue
+                        if ('mots.gov.sy' in news_link or news_link.startswith('/')) and len(news_title) > 20:
                             if news_link.startswith('/'):
                                 news_link = "https://mots.gov.sy" + news_link
-                            if 'index' in news_link or 'contact' in news_link:
+                            if any(x in news_link for x in ['index', 'contact', 'about', 'sitemap', 'login']):
                                 continue
                             
                             full_text, media_url, pub_date = fetch_ministry_article_details(news_link)
-                            if full_text:
+                            if full_text and '@' not in full_text and len(full_text) > 30:
                                 cur.execute(
                                     "INSERT INTO posted_news (news_url, title, full_text, media_url, source, pub_date, status) VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (news_url) DO NOTHING",
                                     (news_link, news_title, full_text, media_url, 'ministry', pub_date, 'pending')
