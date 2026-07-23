@@ -63,7 +63,7 @@ def init_db():
     except Exception as e:
         logging.error(f"Error initializing database: {e}")
 
-# دالة إرسال المقال إلى تليجرام بنص عادي وآمن
+# دالة إرسال المقال إلى تليجرام بتنسيق مرتب ونظيف
 def send_to_telegram(title, full_text, link, media_url, pub_date=""):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
         logging.error("Telegram credentials are missing!")
@@ -79,7 +79,7 @@ def send_to_telegram(title, full_text, link, media_url, pub_date=""):
         f"مصدر المنشور: {source_label}\n"
         f"تاريخ النشر: {formatted_date}\n\n"
         f"{title}\n\n"
-        f"{safe_text[:650]}...\n\n"
+        f"{safe_text}\n\n"
         f"يمكنكم متابعة تفاصيل الخبر رسمياً عبر الرابط أدناه:\n"
         f"{link}\n\n"
         f"#السياحة_السورية {source_tag} #سوريا"
@@ -113,7 +113,7 @@ def send_to_telegram(title, full_text, link, media_url, pub_date=""):
         logging.error(f"Exception while sending to Telegram: {e}")
         return False
 
-# استخراج تفاصيل مقالات سانا
+# استخراج تفاصيل مقالات سانا مع فصل اسم المدينة والمصدر في سطر مستقل
 def fetch_sana_article_details(article_url):
     try:
         session = get_robust_session()
@@ -128,8 +128,37 @@ def fetch_sana_article_details(article_url):
 
             content_div = soup.find('div', class_='entry-content') or soup.find('div', class_='post-content')
             if content_div:
+                # البحث عن بادئة المدينة والمصدر داخل النص (مثل دمشق-سانا أو حلب-سانا)
+                location_prefix = ""
                 paragraphs = content_div.find_all('p')
-                full_text = "\n".join([p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True)])
+                
+                cleaned_paragraphs = []
+                for p in paragraphs:
+                    p_text = p.get_text(strip=True)
+                    if not p_text:
+                        continue
+                    # إذا كانت الفقرة تبدأ بنمط المدينة والمصدر (مثل دمشق-سانا) ولم يتم أخذها بعد
+                    if not location_prefix and ('-سانا' in p_text or 'سانا-' in p_text) and len(p_text) < 40:
+                        location_prefix = p_text
+                        # إزالة البادئة من الفقرة إذا كانت مدمجة في أول السطر
+                        for prefix_candidate in ["دمشق-سانا", "حلب-سانا", "حمص-سانا", "اللاذقية-سانا", "طرطوس-سانا", "حماة-سانا", "دير الزور-سانا", "الحسكة-سانا", "الرقة-سانا", "درعا-سانا", "السويداء-سانا", "القنيطرة-سانا", "إدلب-سانا"]:
+                            if p_text.startswith(prefix_candidate):
+                                location_prefix = prefix_candidate
+                                p_text = p_text[len(prefix_candidate):].strip()
+                                break
+                        if p_text:
+                            cleaned_paragraphs.append(p_text)
+                    else:
+                        cleaned_paragraphs.append(p_text)
+
+                body_text = "\n\n".join(cleaned_paragraphs)
+                
+                # ترتيب النص بحيث تصبح المدينة والمصدر في سطر مستقل يعقبه سطر فارق ثم النص
+                if location_prefix:
+                    full_text = f"{location_prefix}\n\n{body_text}"
+                else:
+                    full_text = body_text
+
                 if not full_text:
                     full_text = content_div.get_text(strip=True)
             else:
