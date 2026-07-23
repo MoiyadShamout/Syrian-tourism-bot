@@ -45,7 +45,7 @@ def init_db():
     except Exception as e:
         logging.error(f"Error initializing database: {e}")
 
-# دالة إرسال الوسائط أو النصوص إلى تليجرام
+# دالة إرسال الوسائط أو النصوص إلى تليجرام بدون أخطاء تنسيق
 def send_to_telegram(title, full_text, link, media_url, is_urgent=False):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
         logging.error("Telegram credentials are missing!")
@@ -75,11 +75,12 @@ def send_to_telegram(title, full_text, link, media_url, is_urgent=False):
         header = "أفق الاستثمار والمشاريع السياحية"
 
     safe_text = full_text if full_text else "التفاصيل متاحة عبر الرابط الرسمي."
+    # استخدام نص عادي آمن تماماً لتجنب مشاكل الـ Markdown
     caption = (
-        f"{icon} **{header}**\n\n"
-        f"📌 **{title}**\n\n"
-        f"{safe_text[:600]}...\n\n"
-        f"🔗 [قراءة التفاصيل والخبر كاملاً من الموقع الرسمي]({link})\n\n"
+        f"{icon} {header}\n\n"
+        f"📌 {title}\n\n"
+        f"{safe_text[:500]}...\n\n"
+        f"🔗 قراءة التفاصيل والخبر كاملاً من الموقع الرسمي:\n{link}\n\n"
         f"{category_tag} #وزارة_السياحة #سانا"
     )
 
@@ -89,15 +90,13 @@ def send_to_telegram(title, full_text, link, media_url, is_urgent=False):
             payload = {
                 "chat_id": TELEGRAM_CHANNEL_ID,
                 "photo": media_url,
-                "caption": caption,
-                "parse_mode": "Markdown"
+                "caption": caption
             }
         else:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             payload = {
                 "chat_id": TELEGRAM_CHANNEL_ID,
                 "text": caption,
-                "parse_mode": "Markdown",
                 "disable_web_page_preview": False
             }
 
@@ -163,7 +162,7 @@ def fetch_and_store_news():
 
 def send_immediate_sample_post():
     try:
-        time.sleep(8) # اعطاء وقت كافي لجلب الأخبار وحفظها أولاً
+        time.sleep(8)
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
         cur = conn.cursor()
         cur.execute("SELECT id, news_url, title, full_text, media_url FROM posted_news WHERE status = 'pending' ORDER BY id ASC LIMIT 1")
