@@ -49,7 +49,7 @@ def init_db():
     except Exception as e:
         logging.error(f"Error initializing database: {e}")
 
-# دالة إرسال المقال إلى تليجرام باللغة العربية مع الاستغلال الأقصى للحروف والجملة المطلوبة
+# دالة إرسال المقال إلى تليجرام باللغة العربية مع عبارة رسمية وموثوقة
 def send_to_telegram(title, full_text, link, media_url, is_urgent=False):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
         logging.error("Telegram credentials are missing!")
@@ -78,9 +78,9 @@ def send_to_telegram(title, full_text, link, media_url, is_urgent=False):
         category_tag = "#استثمار_سياحي #مشاريع_سورية"
         header = "أفق الاستثمار والمشاريع السياحية"
 
-    safe_text = full_text if full_text else "التفاصيل متاحة عبر الرابط الرسمي."
+    # عبارة أكثر رسمية وموثوقية في حال عدم توفر النص الكامل
+    safe_text = full_text if full_text else "يمكنكم متابعة تفاصيل الخبر رسمياً عبر الرابط أدناه."
     
-    # استغلال الحد الأقصى المسموح به في تليجرام (1024 حرفاً للصور)، تم اقتطاع النص بـ 750 حرفاً لتتسع الرسالة بالكامل مع الروابط والوسوم
     caption = (
         f"{icon} {header}\n\n"
         f"📌 {title}\n\n"
@@ -132,14 +132,14 @@ def fetch_article_details(article_url):
                 if not full_text:
                     full_text = content_div.get_text(strip=True)
             else:
-                full_text = "التفاصيل متاحة عبر الرابط الرسمي."
+                full_text = "يمكنكم متابعة تفاصيل الخبر رسمياً عبر الرابط أدناه."
 
             img_tag = soup.find('img', class_='wp-post-image') or (content_div.find('img') if content_div else None)
             media_url = img_tag.get('src') if img_tag else None
             return full_text, media_url
     except Exception as e:
         logging.error(f"Error fetching article details from {article_url}: {e}")
-    return "التفاصيل متاحة عبر الرابط الرسمي.", None
+    return "يمكنكم متابعة تفاصيل الخبر رسمياً عبر الرابط أدناه.", None
 
 def fetch_and_store_news():
     try:
