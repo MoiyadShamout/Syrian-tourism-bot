@@ -60,7 +60,7 @@ def init_db():
     except Exception as e:
         logging.error(f"Error initializing database: {e}")
 
-# دالة إرسال المقال إلى تليجرام بمعالجة آمنة للروابط لمنع أخطاء النوع
+# دالة إرسال المقال إلى تليجرام بشكل آمن كلياً ضد أخطاء الروابط والمحتوى
 def send_to_telegram(title, full_text, link, media_url, pub_date=""):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
         logging.error("Telegram credentials are missing!")
@@ -87,6 +87,9 @@ def send_to_telegram(title, full_text, link, media_url, pub_date=""):
 
     try:
         session = get_robust_session()
+        # إذا كانت الصورة غير صالحة أو رابطها مشكوك فيه، سنقوم بإرسالها كنص مباشر لتجنب فشل الطلب
+        sent_successfully = False
+        
         if media_url and media_url.startswith('http'):
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
             payload = {
@@ -94,21 +97,27 @@ def send_to_telegram(title, full_text, link, media_url, pub_date=""):
                 "photo": media_url,
                 "caption": caption
             }
-        else:
+            response = session.post(url, json=payload, timeout=15)
+            if response.status_code == 200:
+                sent_successfully = True
+            else:
+                logging.warning(f"Failed to send photo, falling back to text message: {response.text}")
+
+        # إذا لم يتم إرسالها كصورة أو فشل رابط الصورة، يتم إرسالها كنص آمن بدون معاينة
+        if not sent_successfully:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             payload = {
                 "chat_id": TELEGRAM_CHANNEL_ID,
                 "text": caption,
-                "link_preview_options": {"is_disabled": True}  # إلغاء المعاينة التلقائية لمنع خطأ نوع المحتوى
+                "disable_web_page_preview": True
             }
+            response = session.post(url, json=payload, timeout=15)
+            if response.status_code == 200:
+                sent_successfully = True
+            else:
+                logging.error(f"Failed to send text message to Telegram: {response.text}")
 
-        response = session.post(url, json=payload, timeout=15)
-        if response.status_code == 200:
-            logging.info("Post from [sana] sent to Telegram successfully.")
-            return True
-        else:
-            logging.error(f"Failed to send to Telegram: {response.text}")
-            return False
+        return sent_successfully
     except Exception as e:
         logging.error(f"Exception while sending to Telegram: {e}")
         return False
@@ -171,7 +180,7 @@ def fetch_sana_article_details(article_url):
         logging.error(f"Error fetching Sana details: {e}")
     return "تفاصيل الخبر متاحة عبر الرابط الرسمي أدناه.", None, ""
 
-# دالة جلب وتخزين الأخبار من قسم السياحة حصراً مع فلترة صارمة للروابط
+# دالة جلب وتخزين الأخبار من قسم السياحة حصراً
 def fetch_and_store_news():
     session = get_robust_session()
     headers = {'User-Agent': 'Mozilla/5.0'}
@@ -199,7 +208,6 @@ def fetch_and_store_news():
                         news_link = link_tag['href']
                         news_title = link_tag.get_text(strip=True)
                         
-                        # فلترة صارمة: قبول روابط السياحة حصراً واستبعاد أي قسم آخر
                         if not news_link or '/tourism/' not in news_link or '/en/' in news_link:
                             continue
                         
