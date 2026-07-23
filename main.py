@@ -60,34 +60,47 @@ def init_db():
     except Exception as e:
         logging.error(f"Error initializing database: {e}")
 
+# تحديد التحية والإيموجي المناسب حسب الوقت
+def get_time_greeting():
+    current_hour = datetime.now().hour
+    if 5 <= current_hour < 12:
+        return "صباح الخير 🌅"
+    elif 12 <= current_hour < 17:
+        return "طاب مساؤكم ☀️"
+    elif 17 <= current_hour < 21:
+        return "مساء الخير 🌇"
+    else:
+        return "طابت ليلتكم 🌙"
+
 # دالة إرسال المقال إلى تليجرام بدقة
 def send_to_telegram(title, full_text, link, media_url, pub_date=""):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
         logging.error("Telegram credentials are missing!")
         return False
     
+    greeting = get_time_greeting()
     source_label = "وكالة الأنباء السورية - سانا (قسم السياحة)"
     source_tag = "#وكالة_سانا"
 
     formatted_date = pub_date if pub_date else "غير محدد"
     safe_text = full_text if full_text else "تفاصيل الخبر متاحة عبر الرابط الرسمي أدناه."
 
-    if len(safe_text) > 550:
-        safe_text = safe_text[:550] + "..."
+    if len(safe_text) > 500:
+        safe_text = safe_text[:500] + "..."
 
     caption = (
-        f"مصدر المنشور: {source_label}\n"
-        f"تاريخ النشر: {formatted_date}\n\n"
-        f"{title}\n\n"
+        f"{greeting}\n\n"
+        f"🔴 {title}\n\n"
         f"{safe_text}\n\n"
-        f"يمكنكم متابعة تفاصيل الخبر رسمياً عبر الرابط أدناه:\n"
+        f"📅 تاريخ النشر: {formatted_date}\n"
+        f"🔗 يمكنكم متابعة تفاصيل الخبر رسمياً عبر الرابط أدناه:\n"
         f"{link}\n\n"
+        f"مصدَر المنشور: {source_label}\n"
         f"#السياحة_السورية {source_tag} #سوريا"
     )
 
     try:
         session = get_robust_session()
-        # التأكد من صحة الرابط قبل الإرسال
         if media_url and media_url.startswith('http'):
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
             payload = {
@@ -129,12 +142,10 @@ def fetch_sana_article_details(article_url):
             if time_tag:
                 pub_date = time_tag.get_text(strip=True)
 
-            # 1. الاستخراج الجذري للصورة عبر meta tags (الطريقة الأضمن 100% وتتجاهل المقالات الجانبية)
             og_image = soup.find('meta', property='og:image') or soup.find('meta', attrs={'name': 'twitter:image'})
             if og_image and og_image.get('content'):
                 media_url = og_image.get('content')
             
-            # 2. حل احتياطي في حال غياب الأوبن جراف (استهداف الصورة البارزة الأساسية فقط)
             if not media_url:
                 main_img = soup.select_one('.single-post-thumb img, .entry-header img, .post-thumbnail img, .wp-post-image')
                 if main_img and main_img.get('src'):
@@ -163,12 +174,7 @@ def fetch_sana_article_details(article_url):
                         cleaned_paragraphs.append(p_text)
 
                 body_text = "\n\n".join(cleaned_paragraphs)
-                
-                if location_prefix:
-                    full_text = f"{location_prefix}\n\n{body_text}"
-                else:
-                    full_text = body_text
-
+                full_text = f"{location_prefix}\n\n{body_text}" if location_prefix else body_text
                 if not full_text:
                     full_text = content_div.get_text(strip=True)
             else:
@@ -218,26 +224,17 @@ def fetch_and_store_news():
     except Exception as e:
         logging.error(f"Error fetching Sana news: {e}")
 
-# إعادة ضبط أحدث خبر وإجباره على الإرسال الفوري للتحقق من أن الصورة 100% صحيحة
+# إرسال عينة فورية عند التشغيل
 def send_immediate_sample_posts():
     try:
         time.sleep(5)
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
         cur = conn.cursor()
         
-        # نعيد جلب تفاصيل أحدث خبر لتحديث صورته بناءً على الكود الجديد قبل إرساله
-        cur.execute("SELECT id, news_url FROM posted_news WHERE source = 'sana' ORDER BY id DESC LIMIT 1")
-        row = cur.fetchone()
-        
-        if row:
-            news_id, news_link = row
-            full_text, media_url, pub_date = fetch_sana_article_details(news_link)
-            
-            # تحديث قاعدة البيانات بالصورة الجديدة المضمونة وجعله pending
-            cur.execute("UPDATE posted_news SET media_url = %s, status = 'pending' WHERE id = %s", (media_url, news_id))
-            conn.commit()
+        cur.execute("UPDATE posted_news SET status = 'pending' WHERE id = (SELECT id FROM posted_news WHERE source = 'sana' ORDER BY id DESC LIMIT 1)")
+        conn.commit()
 
-        cur.execute("SELECT id, news_url, title, full_text, media_url, pub_date FROM posted_news WHERE status = 'pending' AND source = 'sana' ORDER BY id ASC LIMIT 1")
+        cur.execute("SELECT id, news_url, title, full_text, media_url, pub_date FROM posted_news WHERE status = 'pending' AND source = 'sana' ORDER BY id DESC LIMIT 1")
         row = cur.fetchone()
 
         if row:
@@ -245,14 +242,14 @@ def send_immediate_sample_posts():
             if send_to_telegram(news_title, full_text, news_link, media_url, pub_date):
                 cur.execute("UPDATE posted_news SET status = 'sent' WHERE id = %s", (news_id,))
                 conn.commit()
-                logging.info(f"Immediate corrected sample post sent with 100% Accurate image: {news_title}")
+                logging.info(f"Immediate sample post sent: {news_title}")
 
         cur.close()
         conn.close()
     except Exception as e:
         logging.error(f"Error in sending immediate sample: {e}")
 
-# عامل النشر الدوري كل نصف ساعة
+# عامل النشر الدوري (نظام الأولوية والأحدث)
 def alternating_publisher_worker():
     while True:
         try:
@@ -261,7 +258,20 @@ def alternating_publisher_worker():
             conn = psycopg2.connect(DATABASE_URL, sslmode='require')
             cur = conn.cursor()
             
-            cur.execute("SELECT id, news_url, title, full_text, media_url, pub_date FROM posted_news WHERE status = 'pending' AND source = 'sana' ORDER BY id ASC LIMIT 1")
+            # استعلام يفرز القرارات الهامة أولاً، ثم يجلب الأحدث بناءً على المعرف
+            query = """
+                SELECT id, news_url, title, full_text, media_url, pub_date 
+                FROM posted_news 
+                WHERE status = 'pending' AND source = 'sana'
+                ORDER BY 
+                    CASE 
+                        WHEN title LIKE '%قرار%' OR title LIKE '%تعميم%' OR title LIKE '%هام%' OR title LIKE '%حصري%' THEN 1 
+                        ELSE 2 
+                    END ASC, 
+                    id DESC 
+                LIMIT 1
+            """
+            cur.execute(query)
             row = cur.fetchone()
             
             if row:
@@ -270,6 +280,8 @@ def alternating_publisher_worker():
                     cur.execute("UPDATE posted_news SET status = 'sent' WHERE id = %s", (news_id,))
                     conn.commit()
                     logging.info(f"Scheduled Sana post sent: {news_title}")
+            else:
+                logging.info("لا توجد أخبار جديدة معلقة للنشر في هذه النصف ساعة.")
                     
             cur.close()
             conn.close()
