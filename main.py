@@ -60,7 +60,7 @@ def init_db():
     except Exception as e:
         logging.error(f"Error initializing database: {e}")
 
-# دالة إرسال المقال إلى تليجرام بدون تكرار كلمة تاريخ النشر ودون تعديل النصوص
+# دالة إرسال المقال إلى تليجرام بدقة
 def send_to_telegram(title, full_text, link, media_url, pub_date=""):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
         logging.error("Telegram credentials are missing!")
@@ -72,7 +72,6 @@ def send_to_telegram(title, full_text, link, media_url, pub_date=""):
     formatted_date = pub_date if pub_date else "غير محدد"
     safe_text = full_text if full_text else "تفاصيل الخبر متاحة عبر الرابط الرسمي أدناه."
 
-    # اقتصاص النص لضمان عدم تجاوز الحد الأقصى لتعليق تليجرام (1024 حرفاً)
     if len(safe_text) > 550:
         safe_text = safe_text[:550] + "..."
 
@@ -114,18 +113,31 @@ def send_to_telegram(title, full_text, link, media_url, pub_date=""):
         logging.error(f"Exception while sending to Telegram: {e}")
         return False
 
-# استخراج تفاصيل مقالات سانا بالنص الأصلي تماماً دون أي تعديل
+# استخراج تفاصيل مقالات سانا مع التركيز على الصورة البارزة الرسمية فقط
 def fetch_sana_article_details(article_url):
     try:
         session = get_robust_session()
         headers = {'User-Agent': 'Mozilla/5.0'}
         resp = session.get(article_url, headers=headers, timeout=20)
         pub_date = ""
+        media_url = None
+        
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, 'html.parser')
             time_tag = soup.find('time') or soup.find('span', class_='date') or soup.find('span', class_='posted-on')
             if time_tag:
                 pub_date = time_tag.get_text(strip=True)
+
+            # البحث عن الصورة البارزة الرسمية المعتمدة في رأس المقال
+            img_tag = soup.find('img', class_='wp-post-image')
+            if not img_tag:
+                # محاولة البحث ضمن عناصر هيدر المقال أو الحاوية الرئيسية
+                featured_div = soup.find('div', class_='entry-featured') or soup.find('div', class_='post-thumbnail')
+                if featured_div:
+                    img_tag = featured_div.find('img')
+            
+            if img_tag:
+                media_url = img_tag.get('src')
 
             content_div = soup.find('div', class_='entry-content') or soup.find('div', class_='post-content')
             if content_div:
@@ -161,8 +173,6 @@ def fetch_sana_article_details(article_url):
             else:
                 full_text = "تفاصيل الخبر متاحة عبر الرابط الرسمي أدناه."
 
-            img_tag = soup.find('img', class_='wp-post-image') or (content_div.find('img') if content_div else None)
-            media_url = img_tag.get('src') if img_tag else None
             return full_text, media_url, pub_date
     except Exception as e:
         logging.error(f"Error fetching Sana details: {e}")
