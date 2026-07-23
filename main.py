@@ -171,7 +171,7 @@ def fetch_sana_article_details(article_url):
         logging.error(f"Error fetching Sana details: {e}")
     return "تفاصيل الخبر متاحة عبر الرابط الرسمي أدناه.", None, ""
 
-# جلب وتخزين الأخبار من موقع سانا حصراً
+# دالة جلب وتخزين الأخبار من الأرشيف والموقع بدون تكرار
 def fetch_and_store_news():
     session = get_robust_session()
     headers = {'User-Agent': 'Mozilla/5.0'}
@@ -179,36 +179,44 @@ def fetch_and_store_news():
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
         cur = conn.cursor()
 
-        sana_url = "https://sana.sy/tourism/"
-        response = session.get(sana_url, headers=headers, timeout=20)
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
-            articles = soup.find_all('h3', class_='entry-title') or soup.find_all('h2', class_='entry-title') or soup.find_all('a', class_='item-title')
-            
-            for art in articles[:10]:
-                link_tag = art.find('a') if art.name != 'a' else art
-                if link_tag and link_tag.get('href'):
-                    news_link = link_tag['href']
-                    news_title = link_tag.get_text(strip=True)
-                    
-                    if not news_link or '/en/' in news_link:
-                        continue
+        pages_to_scrape = [
+            "https://sana.sy/tourism/",
+            "https://sana.sy/tourism/page/2/",
+            "https://sana.sy/tourism/page/3/",
+            "https://sana.sy/tourism/page/4/",
+            "https://sana.sy/tourism/page/5/"
+        ]
+
+        for sana_url in pages_to_scrape:
+            response = session.get(sana_url, headers=headers, timeout=20)
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.text, 'html.parser')
+                articles = soup.find_all('h3', class_='entry-title') or soup.find_all('h2', class_='entry-title') or soup.find_all('a', class_='item-title')
+                
+                for art in articles:
+                    link_tag = art.find('a') if art.name != 'a' else art
+                    if link_tag and link_tag.get('href'):
+                        news_link = link_tag['href']
+                        news_title = link_tag.get_text(strip=True)
                         
-                    cur.execute("SELECT id FROM posted_news WHERE news_url = %s", (news_link,))
-                    if not cur.fetchone():
-                        full_text, media_url, pub_date = fetch_sana_article_details(news_link)
-                        if full_text:
-                            cur.execute(
-                                "INSERT INTO posted_news (news_url, title, full_text, media_url, source, pub_date, status) VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                                (news_link, news_title, full_text, media_url, 'sana', pub_date, 'pending')
-                            )
-                            conn.commit()
-                            logging.info(f"Stored new Sana article: {news_title}")
+                        if not news_link or '/en/' in news_link:
+                            continue
+                        
+                        cur.execute("SELECT id FROM posted_news WHERE news_url = %s", (news_link,))
+                        if not cur.fetchone():
+                            full_text, media_url, pub_date = fetch_sana_article_details(news_link)
+                            if full_text:
+                                cur.execute(
+                                    "INSERT INTO posted_news (news_url, title, full_text, media_url, source, pub_date, status) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                                    (news_link, news_title, full_text, media_url, 'sana', pub_date, 'pending')
+                                )
+                                conn.commit()
+                                logging.info(f"Stored unique Sana article: {news_title}")
 
         cur.close()
         conn.close()
     except Exception as e:
-        logging.error(f"Error fetching Sana news: {e}")
+        logging.error(f"Error fetching diverse Sana news: {e}")
 
 # إرسال عينة فورية عند التشغيل
 def send_immediate_sample_posts():
@@ -216,11 +224,9 @@ def send_immediate_sample_posts():
         time.sleep(5)
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
         cur = conn.cursor()
-        
-        cur.execute("UPDATE posted_news SET status = 'pending' WHERE id = (SELECT id FROM posted_news WHERE source = 'sana' ORDER BY id DESC LIMIT 1)")
-        conn.commit()
 
-        cur.execute("SELECT id, news_url, title, full_text, media_url, pub_date FROM posted_news WHERE status = 'pending' AND source = 'sana' ORDER BY id DESC LIMIT 1")
+        # اختيار أحدث تاريخ متوفر ضمن الأخبار المعلقة غير المكررة
+        cur.execute("SELECT id, news_url, title, full_text, media_url, pub_date FROM posted_news WHERE status = 'pending' AND source = 'sana' ORDER BY pub_date DESC, id DESC LIMIT 1")
         row = cur.fetchone()
 
         if row:
@@ -228,57 +234,43 @@ def send_immediate_sample_posts():
             if send_to_telegram(news_title, full_text, news_link, media_url, pub_date):
                 cur.execute("UPDATE posted_news SET status = 'sent' WHERE id = %s", (news_id,))
                 conn.commit()
-                logging.info(f"Immediate sample post sent: {news_title}")
+                logging.info(f"Immediate latest-date post sent: {news_title}")
 
         cur.close()
         conn.close()
     except Exception as e:
         logging.error(f"Error in sending immediate sample: {e}")
 
-# عامل النشر الدوري (مع تدوير المنشورات القديمة في حال غياب الجديدة)
+# عامل النشر الدوري (أولوية للخبر الأجدد تاريخاً أولاً، ثم الأقدم فالأقدم، بدون تكرار)
 def alternating_publisher_worker():
     while True:
         try:
-            time.sleep(1800)  # كل 30 دقيقة
-            
+            fetch_and_store_news()
+            time.sleep(1800)  # الانتظار نصف ساعة
+            fetch_and_store_news()
+
             conn = psycopg2.connect(DATABASE_URL, sslmode='require')
             cur = conn.cursor()
             
-            # 1. البحث أولاً عن الأخبار المعلقة (pending) مع أولوية القرارات والأحدث
+            # استعلام يمنح الأولوية القصوى للمنشور الذي يحمل تاريخ النشر الأجدد (pub_date DESC) ثم الأقدم فالأقدم
             query = """
                 SELECT id, news_url, title, full_text, media_url, pub_date 
                 FROM posted_news 
                 WHERE status = 'pending' AND source = 'sana'
-                ORDER BY 
-                    CASE 
-                        WHEN title LIKE '%قرار%' OR title LIKE '%تعميم%' OR title LIKE '%هام%' OR title LIKE '%حصري%' THEN 1 
-                        ELSE 2 
-                    END ASC, 
-                    id DESC 
+                ORDER BY pub_date DESC, id DESC 
                 LIMIT 1
             """
             cur.execute(query)
             row = cur.fetchone()
             
-            # 2. إذا لم توجد أخبار جديدة، يتم اختيار أقدم خبر تم نشره مسبقاً لإعادة تدويره
-            if not row:
-                fallback_query = """
-                    SELECT id, news_url, title, full_text, media_url, pub_date 
-                    FROM posted_news 
-                    WHERE status = 'sent' AND source = 'sana'
-                    ORDER BY id ASC 
-                    LIMIT 1
-                """
-                cur.execute(fallback_query)
-                row = cur.fetchone()
-            
             if row:
                 news_id, news_link, news_title, full_text, media_url, pub_date = row
                 if send_to_telegram(news_title, full_text, news_link, media_url, pub_date):
-                    # تحديث الحالة إلى sent لضمان استمرار الدورة المستمرة
                     cur.execute("UPDATE posted_news SET status = 'sent' WHERE id = %s", (news_id,))
                     conn.commit()
-                    logging.info(f"Scheduled/Recycled Sana post sent: {news_title}")
+                    logging.info(f"Scheduled latest-date Sana post sent: {news_title}")
+            else:
+                logging.info("لا توجد منشورات جديدة معلقة حالياً.")
                     
             cur.close()
             conn.close()
@@ -288,7 +280,7 @@ def alternating_publisher_worker():
 def background_scraper_worker():
     while True:
         fetch_and_store_news()
-        time.sleep(900)
+        time.sleep(3600)
 
 def start_background_tasks():
     init_db()
