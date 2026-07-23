@@ -45,7 +45,7 @@ def init_db():
     except Exception as e:
         logging.error(f"Error initializing database: {e}")
 
-# دالة إرسال الوسائط أو النصوص إلى تليجرام بدون أخطاء تنسيق
+# دالة إرسال الوسائط أو النصوص إلى تليجرام باللغة العربية
 def send_to_telegram(title, full_text, link, media_url, is_urgent=False):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
         logging.error("Telegram credentials are missing!")
@@ -75,7 +75,6 @@ def send_to_telegram(title, full_text, link, media_url, is_urgent=False):
         header = "أفق الاستثمار والمشاريع السياحية"
 
     safe_text = full_text if full_text else "التفاصيل متاحة عبر الرابط الرسمي."
-    # استخدام نص عادي آمن تماماً لتجنب مشاكل الـ Markdown
     caption = (
         f"{icon} {header}\n\n"
         f"📌 {title}\n\n"
@@ -128,13 +127,14 @@ def fetch_article_details(article_url):
 
 def fetch_and_store_news():
     try:
-        target_url = "https://sana.sy/en/tour-syria/"
+        # تم تغيير الرابط إلى النسخة العربية المخصصة للسياحة في موقع سانا
+        target_url = "https://sana.sy/?cat=23" # قسم السياحة باللغة العربية في سانا
         headers = {'User-Agent': 'Mozilla/5.0'}
         response = requests.get(target_url, headers=headers, timeout=15)
         
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
-            articles = soup.find_all('h3', class_='entry-title') or soup.find_all('a', class_='item-title')
+            articles = soup.find_all('h3', class_='entry-title') or soup.find_all('h2', class_='entry-title') or soup.find_all('a', class_='item-title')
             
             conn = psycopg2.connect(DATABASE_URL, sslmode='require')
             cur = conn.cursor()
@@ -173,7 +173,7 @@ def send_immediate_sample_post():
             if send_to_telegram(news_title, full_text, news_link, media_url, is_urgent=False):
                 cur.execute("UPDATE posted_news SET status = 'sent' WHERE id = %s", (news_id,))
                 conn.commit()
-                logging.info("Immediate sample post sent successfully.")
+                logging.info("Immediate Arabic sample post sent successfully.")
         else:
             logging.info("No pending news found for immediate post.")
         cur.close()
