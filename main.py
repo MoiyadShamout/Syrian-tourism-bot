@@ -60,7 +60,7 @@ def init_db():
     except Exception as e:
         logging.error(f"Error initializing database: {e}")
 
-# دالة إرسال المقال إلى تليجرام بالتنسيق الكلاسيكي
+# دالة إرسال المقال إلى تليجرام بمعالجة آمنة للروابط لمنع أخطاء النوع
 def send_to_telegram(title, full_text, link, media_url, pub_date=""):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
         logging.error("Telegram credentials are missing!")
@@ -99,7 +99,7 @@ def send_to_telegram(title, full_text, link, media_url, pub_date=""):
             payload = {
                 "chat_id": TELEGRAM_CHANNEL_ID,
                 "text": caption,
-                "disable_web_page_preview": False
+                "link_preview_options": {"is_disabled": True}  # إلغاء المعاينة التلقائية لمنع خطأ نوع المحتوى
             }
 
         response = session.post(url, json=payload, timeout=15)
@@ -199,7 +199,7 @@ def fetch_and_store_news():
                         news_link = link_tag['href']
                         news_title = link_tag.get_text(strip=True)
                         
-                        # فلترة صارمة: قبول روابط السياحة حصراً واستبعاد أي قسم آخر (مثل international أو local العادية)
+                        # فلترة صارمة: قبول روابط السياحة حصراً واستبعاد أي قسم آخر
                         if not news_link or '/tourism/' not in news_link or '/en/' in news_link:
                             continue
                         
@@ -241,7 +241,7 @@ def send_immediate_sample_posts():
     except Exception as e:
         logging.error(f"Error in sending immediate sample: {e}")
 
-# عامل النشر الدوري (ينشر منشورين معاً كل نصف ساعة لتعويض أي نقص وضمان التدفق الدقيق)
+# عامل النشر الدوري
 def alternating_publisher_worker():
     while True:
         try:
@@ -252,7 +252,6 @@ def alternating_publisher_worker():
             conn = psycopg2.connect(DATABASE_URL, sslmode='require')
             cur = conn.cursor()
             
-            # جلب منشورين في كل دورة بناءً على الأحدث تاريخاً لضمان وصول منشورين كما طلبت
             query = """
                 SELECT id, news_url, title, full_text, media_url, pub_date 
                 FROM posted_news 
@@ -269,7 +268,7 @@ def alternating_publisher_worker():
                     cur.execute("UPDATE posted_news SET status = 'sent' WHERE id = %s", (news_id,))
                     conn.commit()
                     logging.info(f"Scheduled tourism Sana post sent: {news_title}")
-                time.sleep(3) # فاصل زمني قصير بين المنشورين لمنع الحظر من تليجرام
+                time.sleep(3)
                     
             cur.close()
             conn.close()
