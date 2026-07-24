@@ -23,13 +23,13 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return {"status": "active", "message": "Syrian Tourism Custom Scraper Bot is running perfectly!"}, 200
+    return {"status": "active", "message": "Syrian Tourism Test Scraper Bot is running!"}, 200
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-# قائمة المصادر العشرة المعتمدة
+# قائمة المصادر المعتمدة
 SOURCES = [
     {"name": "وزارة السياحة السورية (القرارات الرسمية والملفات)", "type": "mots"},
     {"name": "وكالة الأنباء السورية - سانا (قسم السياحة)", "type": "sana"},
@@ -47,7 +47,7 @@ current_source_index = 0
 
 def get_robust_session():
     session = requests.Session()
-    retries = Retry(total=5, backoff_factor=2, status_forcelist=[500, 502, 503, 504])
+    retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
     session.mount('https://', HTTPAdapter(max_retries=retries))
     session.mount('http://', HTTPAdapter(max_retries=retries))
     return session
@@ -154,7 +154,6 @@ def send_to_telegram(title, full_text, link, media_url, pub_date="", source=""):
         logging.error(f"Telegram send error: {e}")
         return False
 
-# --- دالة إضافة الخبر لقاعدة البيانات ---
 def save_to_db(news_url, title, full_text, source_key, media_url=None):
     if not news_url or not title: return
     try:
@@ -173,83 +172,43 @@ def save_to_db(news_url, title, full_text, source_key, media_url=None):
     except Exception as e:
         logging.error(f"DB save error: {e}")
 
-# --- دوال الزحف المخصصة لكل مصدر ---
+# --- دوال جلب مرنة تلتقط أحدث المتاح حالياً ---
 
 def fetch_mots_pdfs():
     session = get_robust_session()
     base_url = "https://mots.gov.sy/"
-    pages = [base_url, "https://mots.gov.sy/page/97281/قوانين-المكاتب-والمؤسسات", "https://mots.gov.sy/page/97282/قانون-المكاتب-السياحية"]
-    for page in pages:
-        try:
-            resp = session.get(page, headers=HEADERS, timeout=15, verify=False)
-            if resp.status_code == 200:
-                soup = BeautifulSoup(resp.text, 'html.parser')
-                for l in soup.find_all('a', href=True):
-                    href = l['href']
-                    if '.pdf' in href.lower():
-                        pdf_link = urljoin(page, href)
-                        title = l.get_text(strip=True) or "وثيقة رسمية من وزارة السياحة"
-                        save_to_db(pdf_link, title, f"ملف تعميم أو قرار رسمي صادر عن وزارة السياحة بعنوان: {title}", 'mots', pdf_link)
-        except Exception as e:
-            logging.warning(f"MOTS error: {e}")
-
-def fetch_sana_news():
-    session = get_robust_session()
     try:
-        resp = session.get("https://sana.sy/tourism/", headers=HEADERS, timeout=15)
+        resp = session.get(base_url, headers=HEADERS, timeout=15, verify=False)
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, 'html.parser')
-            for art in soup.find_all(['h3', 'h2'], class_=['entry-title', 'post-title']):
-                a = art.find('a')
-                if a and a.get('href'):
-                    link = a['href']
-                    title = a.get_text(strip=True)
-                    save_to_db(link, title, f"تقرير من وكالة سانا السياحية: {title}", 'sana')
+            count = 0
+            for l in soup.find_all('a', href=True):
+                href = l['href']
+                if '.pdf' in href.lower() and count < 3:
+                    pdf_link = urljoin(base_url, href)
+                    title = l.get_text(strip=True) or "وثيقة رسمية من وزارة السياحة"
+                    save_to_db(pdf_link, title, f"ملف تعميم أو قرار رسمي صادر عن وزارة السياحة بعنوان: {title}", 'mots', pdf_link)
+                    count += 1
     except Exception as e:
-        logging.error(f"Sana error: {e}")
+        logging.warning(f"MOTS error: {e}")
 
-def fetch_enab_news():
-    session = get_robust_session()
-    try:
-        resp = session.get("https://www.enabbaladi.net/category/mix/tourism/", headers=HEADERS, timeout=15, verify=False)
-        if resp.status_code == 200:
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            for h in soup.find_all(['h2', 'h3'], class_=['title', 'post-title', 'entry-title']):
-                a = h.find('a')
-                if a and a.get('href'):
-                    save_to_db(a['href'], a.get_text(strip=True), f"تغطية سياحية من عنب بلدي: {a.get_text(strip=True)}", 'enab')
-    except Exception as e:
-        logging.error(f"Enab error: {e}")
-
-def fetch_syriatv_news():
-    session = get_robust_session()
-    try:
-        resp = session.get("https://www.syria.tv/tag/السياحة", headers=HEADERS, timeout=15, verify=False)
-        if resp.status_code == 200:
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            for a in soup.find_all('a', href=True):
-                if '/article/' in a['href'] and len(a.get_text(strip=True)) > 20:
-                    link = urljoin("https://www.syria.tv", a['href'])
-                    save_to_db(link, a.get_text(strip=True), f"تقرير وتغطية من تلفزيون سوريا.", 'syriatv')
-    except Exception as e:
-        logging.error(f"SyriaTV error: {e}")
-
-def fetch_general_source(name, key, url, selector_tag='a'):
+def fetch_flexible_source(name, key, url):
     session = get_robust_session()
     try:
         resp = session.get(url, headers=HEADERS, timeout=15, verify=False)
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, 'html.parser')
-            for item in soup.find_all(selector_tag, href=True):
-                title = item.get_text(strip=True)
-                link = item['href']
-                if len(title) > 25 and ('http' in link or '/' in link):
+            count = 0
+            for a in soup.find_all('a', href=True):
+                title = a.get_text(strip=True)
+                link = a['href']
+                if len(title) > 20 and count < 3:
                     full_link = urljoin(url, link)
-                    save_to_db(full_link, title, f"متابعة ميدانية واقتصادية سياحية عبر {name}.", key)
+                    save_to_db(full_link, title, f"تغطية ومتابعة من {name} لواقع الخدمات والفعاليات.", key)
+                    count += 1
     except Exception as e:
         logging.error(f"{name} error: {e}")
 
-# --- الموجه الخلفي (Background Worker) ---
 def background_worker():
     time.sleep(10)
     global current_source_index
@@ -257,25 +216,25 @@ def background_worker():
         try:
             active = SOURCES[current_source_index]
             stype = active["type"]
-            logging.info(f"Running custom scraper for: {active['name']}")
+            logging.info(f"Running flexible fetcher for: {active['name']}")
             
             if stype == 'mots': fetch_mots_pdfs()
-            elif stype == 'sana': fetch_sana_news()
-            elif stype == 'enab': fetch_enab_news()
-            elif stype == 'syriatv': fetch_syriatv_news()
-            elif stype == 'syriasteps': fetch_general_source("سيرياستيبس", "syriasteps", "https://www.syriasteps.com/index.php?m=154")
-            elif stype == 'syriandays': fetch_general_source("سيريان ديز", "syriandays", "https://www.syriandays.com/index.php?page=show&select_page=52")
-            elif stype == 'jpnews': fetch_general_source("جهينة نيوز", "jpnews", "https://jpnews-sy.com/ar/cats.php?subcat=31")
-            elif stype == 'tourism_global': fetch_general_source("توريزم ديلي نيوز", "tourism_global", "https://tourismdailynews.com/")
-            elif stype == 'alwatan': fetch_general_source("جريدة الوطن", "alwatan", "https://alwatan.sy/")
-            elif stype == 'thawra': fetch_general_source("جريدة الثورة", "thawra", "https://thawra.sy/")
+            elif stype == 'sana': fetch_flexible_source("وكالة سانا", "sana", "https://sana.sy/tourism/")
+            elif stype == 'enab': fetch_flexible_source("عنب بلدي", "enab", "https://www.enabbaladi.net/category/mix/tourism/")
+            elif stype == 'syriatv': fetch_flexible_source("تلفزيون سوريا", "syriatv", "https://www.syria.tv/tag/السياحة")
+            elif stype == 'syriasteps': fetch_flexible_source("سيرياستيبس", "syriasteps", "https://www.syriasteps.com/index.php?m=154")
+            elif stype == 'syriandays': fetch_flexible_source("سيريان ديز", "syriandays", "https://www.syriandays.com/index.php?page=show&select_page=52")
+            elif stype == 'jpnews': fetch_flexible_source("جهينة نيوز", "jpnews", "https://jpnews-sy.com/ar/cats.php?subcat=31")
+            elif stype == 'tourism_global': fetch_flexible_source("توريزم ديلي نيوز", "tourism_global", "https://tourismdailynews.com/")
+            elif stype == 'alwatan': fetch_flexible_source("جريدة الوطن", "alwatan", "https://alwatan.sy/")
+            elif stype == 'thawra': fetch_flexible_source("جريدة الثورة", "thawra", "https://thawra.sy/")
 
             current_source_index = (current_source_index + 1) % len(SOURCES)
 
-            # معالجة الأخبار المعلقة ونشرها
+            # معالجة الأخبار المعلقة ونشرها فوراً
             conn = psycopg2.connect(DATABASE_URL, sslmode='require')
             cur = conn.cursor()
-            cur.execute("SELECT id, news_url, title, full_text, media_url, pub_date, source FROM posted_news WHERE status = 'pending' ORDER BY id ASC LIMIT 3")
+            cur.execute("SELECT id, news_url, title, full_text, media_url, pub_date, source FROM posted_news WHERE status = 'pending' ORDER BY id ASC LIMIT 5")
             rows = cur.fetchall()
             for r in rows:
                 nid, nlink, ntitle, ntext, nmedia, ndate, nsource = r
@@ -288,13 +247,13 @@ def background_worker():
         except Exception as e:
             logging.error(f"Worker cycle error: {e}")
         
-        # الانتظار لمدة 3 دقائق بين دورات المصادر
-        time.sleep(180)
+        # دورة قصيرة جداً (دقيقة واحدة) للاختبار الفوري
+        time.sleep(60)
 
 def start_bot():
     init_db()
     fetch_mots_pdfs()
-    fetch_sana_news()
+    fetch_flexible_source("وكالة سانا", "sana", "https://sana.sy/tourism/")
     threading.Thread(target=background_worker, daemon=True).start()
 
 start_bot()
