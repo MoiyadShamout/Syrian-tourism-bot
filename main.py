@@ -21,7 +21,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return {"status": "active", "message": "Syrian Tourism Bot V12 is running with exact SANA post format!"}, 200
+    return {"status": "active", "message": "Syrian Tourism Bot V13 is running with full image extraction and max Telegram text length!"}, 200
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID")
@@ -74,7 +74,7 @@ def init_db():
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
         cur = conn.cursor()
         cur.execute('''
-            CREATE TABLE IF NOT EXISTS news_db_v12 (
+            CREATE TABLE IF NOT EXISTS news_db_v13 (
                 id SERIAL PRIMARY KEY,
                 news_url TEXT UNIQUE,
                 title TEXT,
@@ -88,7 +88,7 @@ def init_db():
         conn.commit()
         cur.close()
         conn.close()
-        logging.info("🚀 تم تهيئة قاعدة البيانات V12 بنجاح.")
+        logging.info("🚀 تم تهيئة قاعدة البيانات V13 بنجاح.")
     except Exception as e:
         logging.error(f"❌ خطأ في قاعدة البيانات: {e}")
 
@@ -113,17 +113,26 @@ def extract_article_details(url):
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, 'html.parser')
             
-            og_image = soup.find('meta', property='og:image') or soup.find('meta', attrs={'name': 'twitter:image'})
-            if og_image and og_image.get('content'):
-                img_url = og_image['content']
-            else:
-                img_tag = soup.find('img', class_=['attachment-large', 'post-image', 'featured-img', 'image', 'wp-post-image']) or soup.find('article img')
-                if img_tag and img_tag.get('src'):
-                    img_url = img_tag['src']
+            # جلب الصورة الأصلية بدقة عالية وبحث متعدد في وسوم الصفحة
+            og_image = soup.find('meta', property='og:image') or soup.find('meta', attrs={'name': 'twitter:image'}) or soup.find('link', rel='image_src')
+            if og_image:
+                img_url = og_image.get('content') or og_image.get('href')
+            
+            if not img_url:
+                # البحث عن أول صورة بارزة داخل محتوى المقال
+                article_body = soup.find('article') or soup.find('div', class_=['post-content', 'content', 'entry-content', 'article-body', 'details-body'])
+                if article_body:
+                    img_tag = article_body.find('img')
+                else:
+                    img_tag = soup.find('img')
+                
+                if img_tag:
+                    img_url = img_tag.get('src') or img_tag.get('data-src')
 
             if img_url and img_url.startswith('/'):
                 img_url = urljoin(url, img_url)
 
+            # استخراج التاريخ الأصلي
             time_tag = soup.find('time') or soup.find(class_=['date', 'post-date', 'publish-date', 'time', 'article-date', 'published'])
             if time_tag:
                 pub_date = time_tag.get_text(strip=True)
@@ -133,15 +142,16 @@ def extract_article_details(url):
                 if date_match:
                     pub_date = date_match.group(0)
 
+            # سحب النص بالحد الأقصى المسموح به في تيليجرام (نطاق واسع يغطي الفقرات الأساسية)
             paragraphs = soup.find_all('p')
             for p in paragraphs:
                 txt = p.get_text(strip=True)
-                if len(txt) > 40:
+                if len(txt) > 30 and "حقوق النشر" not in txt and "جميع الحقوق" not in txt:
                     full_text += txt + "\n\n"
-                if len(full_text) > 350:
+                if len(full_text) > 850: # إبقاء المساحة متبقية للعنوان والرابط ضمن سقف 1024 حرف
                     break
-            if len(full_text) > 450:
-                full_text = full_text[:445] + "..."
+            if len(full_text) > 900:
+                full_text = full_text[:895] + "..."
                 
     except Exception as e:
         logging.error(f"Error extracting details from {url}: {e}")
@@ -152,12 +162,10 @@ def extract_article_details(url):
     return img_url, full_text.strip(), pub_date.strip()
 
 def send_to_telegram(title, full_text, link, media_url, pub_date="", source=""):
-    """تنسيق المنشور الموحد تماماً مثل تنسيق موقع سانا الرسمي"""
-    is_pdf = media_url and media_url.lower().endswith('.pdf')
     decoded_link = unquote(link)
     hashtags = get_source_tags(source)
     
-    # القالب القياسي تماماً كمنشورات سانا
+    # القالب الرسمي المعتمد
     caption = f"مصدر المنشور: {source}\n"
     caption += f"تاريخ النشر: {pub_date}\n\n"
     caption += f"{title}\n\n"
@@ -172,12 +180,16 @@ def send_to_telegram(title, full_text, link, media_url, pub_date="", source=""):
     try:
         session = get_robust_session()
         sent = False
+        is_pdf = media_url and media_url.lower().endswith('.pdf')
+        
         if is_pdf:
             res = session.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument", 
                                json={"chat_id": TELEGRAM_CHANNEL_ID, "document": media_url, "caption": caption}, timeout=15)
         elif media_url:
+            # محاولة إرسال الصورة الأصلية مع النص
             res = session.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto", 
                                json={"chat_id": TELEGRAM_CHANNEL_ID, "photo": media_url, "caption": caption}, timeout=15)
+            # لو فشل رابط الصورة لأي سبب فني، يتم إرسال الخبر كنص مع المعاينة لضمان عدم ضياع النشر
             if res.status_code != 200:
                 res = session.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
                                    json={"chat_id": TELEGRAM_CHANNEL_ID, "text": caption, "disable_web_page_preview": False}, timeout=15)
@@ -186,7 +198,7 @@ def send_to_telegram(title, full_text, link, media_url, pub_date="", source=""):
                                json={"chat_id": TELEGRAM_CHANNEL_ID, "text": caption, "disable_web_page_preview": False}, timeout=15)
 
         if res and res.status_code == 200:
-            logging.info(f"✅ تم الإرسال بالتنسيق المطابق لسانا: {title[:30]}")
+            logging.info(f"✅ تم الإرسال بنجاح مع الصورة والنص الكامل: {title[:30]}")
             sent = True
         return sent
     except Exception as e:
@@ -202,7 +214,7 @@ def save_to_db(news_url, title, source_name, media_url=None, skip_extract=False)
     try:
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
         cur = conn.cursor()
-        cur.execute("SELECT id FROM news_db_v12 WHERE news_url = %s", (news_url,))
+        cur.execute("SELECT id FROM news_db_v13 WHERE news_url = %s", (news_url,))
         if not cur.fetchone():
             fetched_media, fetched_text, fetched_date = None, "", ""
             if not skip_extract:
@@ -212,7 +224,7 @@ def save_to_db(news_url, title, source_name, media_url=None, skip_extract=False)
             final_date = fetched_date if fetched_date else "لم يتم تحديد التاريخ"
             
             cur.execute(
-                "INSERT INTO news_db_v12 (news_url, title, full_text, media_url, source, pub_date, status) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                "INSERT INTO news_db_v13 (news_url, title, full_text, media_url, source, pub_date, status) VALUES (%s, %s, %s, %s, %s, %s, %s)",
                 (news_url, title, fetched_text, final_media, source_name, final_date, 'pending')
             )
             conn.commit()
@@ -269,12 +281,12 @@ def process_pending_news():
     try:
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
         cur = conn.cursor()
-        cur.execute("SELECT id, news_url, title, full_text, media_url, pub_date, source FROM news_db_v12 WHERE status = 'pending' ORDER BY id ASC LIMIT 1")
+        cur.execute("SELECT id, news_url, title, full_text, media_url, pub_date, source FROM news_db_v13 WHERE status = 'pending' ORDER BY id ASC LIMIT 1")
         row = cur.fetchone()
         if row:
             nid, nlink, ntitle, ntext, nmedia, ndate, nsource = row
             if send_to_telegram(ntitle, ntext, nlink, nmedia, ndate, nsource):
-                cur.execute("UPDATE news_db_v12 SET status = 'sent' WHERE id = %s", (nid,))
+                cur.execute("UPDATE news_db_v13 SET status = 'sent' WHERE id = %s", (nid,))
                 conn.commit()
         cur.close()
         conn.close()
@@ -284,14 +296,12 @@ def process_pending_news():
 def background_worker():
     global current_source_index
     
-    # 1. تنفيذ فوري لمعاينة أول خبر بالهيئة المطلوبة
-    logging.info("🚀 بدء التنفيذ الفوري لمعاينة أول خبر سياحي...")
+    logging.info("🚀 بدء التنفيذ الفوري لمعاينة أول خبر بالصورة والنص الكامل...")
     active = SOURCES[current_source_index]
     fetch_source_news(active)
     process_pending_news()
     current_source_index = (current_source_index + 1) % len(SOURCES)
 
-    # 2. الحلقة الدورية المنتظمة كل نصف ساعة من موقع مختلف
     while True:
         try:
             active = SOURCES[current_source_index]
