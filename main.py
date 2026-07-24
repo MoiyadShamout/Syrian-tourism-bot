@@ -60,7 +60,28 @@ def init_db():
     except Exception as e:
         logging.error(f"Error initializing database: {e}")
 
-# دالة إرسال المقال إلى تليجرام بشكل آمن كلياً ضد أخطاء الروابط والمحتوى
+# دالة تنظيف النص وإزالة التكرارات المتتالية
+def clean_text_content(text):
+    if not text:
+        return ""
+    
+    # تقسيم النص إلى أسطر
+    lines = text.split('\n')
+    cleaned_lines = []
+    seen_lines = set()
+    
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        # منع تكرار نفس السطر متتالياً أو تكرار العبارات الخدمية المكررة
+        if stripped not in seen_lines or len(stripped) > 50:
+            cleaned_lines.append(stripped)
+            seen_lines.add(stripped)
+            
+    return "\n\n".join(cleaned_lines)
+
+# دالة إرسال المنشور إلى تليجرام
 def send_to_telegram(title, full_text, link, media_url, pub_date=""):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
         logging.error("Telegram credentials are missing!")
@@ -70,7 +91,9 @@ def send_to_telegram(title, full_text, link, media_url, pub_date=""):
     source_tag = "#وكالة_سانا"
 
     formatted_date = pub_date if pub_date else "غير محدد"
-    safe_text = full_text if full_text else "تفاصيل الخبر متاحة عبر الرابط الرسمي أدناه."
+    safe_text = clean_text_content(full_text)
+    if not safe_text:
+        safe_text = "تفاصيل الخبر متاحة عبر الرابط الرسمي أدناه."
 
     if len(safe_text) > 550:
         safe_text = safe_text[:550] + "..."
@@ -87,10 +110,10 @@ def send_to_telegram(title, full_text, link, media_url, pub_date=""):
 
     try:
         session = get_robust_session()
-        # إذا كانت الصورة غير صالحة أو رابطها مشكوك فيه، سنقوم بإرسالها كنص مباشر لتجنب فشل الطلب
         sent_successfully = False
         
-        if media_url and media_url.startswith('http'):
+        # محاولة إرسال الصورة إذا كانت صالحة تماماً
+        if media_url and media_url.startswith('http') and ('sana.sy' in media_url or 'wp-content' in media_url):
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
             payload = {
                 "chat_id": TELEGRAM_CHANNEL_ID,
@@ -101,9 +124,9 @@ def send_to_telegram(title, full_text, link, media_url, pub_date=""):
             if response.status_code == 200:
                 sent_successfully = True
             else:
-                logging.warning(f"Failed to send photo, falling back to text message: {response.text}")
+                logging.warning(f"Photo rejected by Telegram, falling back to text: {response.text}")
 
-        # إذا لم يتم إرسالها كصورة أو فشل رابط الصورة، يتم إرسالها كنص آمن بدون معاينة
+        # إذا فشلت الصورة أو لم تكن موجودة، يتم إرسالها كنص آمن
         if not sent_successfully:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             payload = {
@@ -122,7 +145,7 @@ def send_to_telegram(title, full_text, link, media_url, pub_date=""):
         logging.error(f"Exception while sending to Telegram: {e}")
         return False
 
-# استخراج تفاصيل مقالات سانا السياحية حصراً
+# استخراج تفاصيل مقالات سانا السياحية حصراً مع الصورة الأساسية
 def fetch_sana_article_details(article_url):
     try:
         session = get_robust_session()
@@ -180,7 +203,7 @@ def fetch_sana_article_details(article_url):
         logging.error(f"Error fetching Sana details: {e}")
     return "تفاصيل الخبر متاحة عبر الرابط الرسمي أدناه.", None, ""
 
-# دالة جلب وتخزين الأخبار من قسم السياحة حصراً
+# دالة جلب وتخزين الأخبار مع الفلترة الصارمة جداً لقسم السياحة حصراً
 def fetch_and_store_news():
     session = get_robust_session()
     headers = {'User-Agent': 'Mozilla/5.0'}
@@ -191,15 +214,14 @@ def fetch_and_store_news():
         pages_to_scrape = [
             "https://sana.sy/tourism/",
             "https://sana.sy/tourism/page/2/",
-            "https://sana.sy/tourism/page/3/",
-            "https://sana.sy/tourism/page/4/",
-            "https://sana.sy/tourism/page/5/"
+            "https://sana.sy/tourism/page/3/"
         ]
 
         for sana_url in pages_to_scrape:
             response = session.get(sana_url, headers=headers, timeout=20)
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, 'html.parser')
+                # استهداف العناصر التي تحتوي على روابط المقالات ضمن الصفحة
                 articles = soup.find_all('h3', class_='entry-title') or soup.find_all('h2', class_='entry-title') or soup.find_all('a', class_='item-title')
                 
                 for art in articles:
@@ -208,7 +230,8 @@ def fetch_and_store_news():
                         news_link = link_tag['href']
                         news_title = link_tag.get_text(strip=True)
                         
-                        if not news_link or '/tourism/' not in news_link or '/en/' in news_link:
+                        # فلترة صارمة للغاية: يجب أن يحتوي الرابط على كلمة /tourism/ حصراً ولا ينتمي لأي قسم آخر
+                        if not news_link or '/tourism/' not in news_link or '/economy/' in news_link or '/politics/' in news_link or '/en/' in news_link:
                             continue
                         
                         cur.execute("SELECT id FROM posted_news WHERE news_url = %s", (news_link,))
@@ -220,7 +243,7 @@ def fetch_and_store_news():
                                     (news_link, news_title, full_text, media_url, 'sana', pub_date, 'pending')
                                 )
                                 conn.commit()
-                                logging.info(f"Stored unique Tourism Sana article: {news_title}")
+                                logging.info(f"Stored verified Tourism Sana article: {news_title}")
 
         cur.close()
         conn.close()
@@ -242,59 +265,57 @@ def send_immediate_sample_posts():
             if send_to_telegram(news_title, full_text, news_link, media_url, pub_date):
                 cur.execute("UPDATE posted_news SET status = 'sent' WHERE id = %s", (news_id,))
                 conn.commit()
-                logging.info(f"Immediate latest-date tourism post sent: {news_title}")
+                logging.info(f"Immediate verified tourism post sent: {news_title}")
 
         cur.close()
         conn.close()
     except Exception as e:
         logging.error(f"Error in sending immediate sample: {e}")
 
-# عامل النشر الدوري
-def alternating_publisher_worker():
+# عامل النشر الدوري المتزامن (منشور واحد كل ساعة)
+def hourly_publisher_worker():
     while True:
         try:
+            # تحديث قاعدة البيانات بالأخبار الجديدة أولاً
             fetch_and_store_news()
-            time.sleep(1800)  # الانتظار نصف ساعة
-            fetch_and_store_news()
-
+            
             conn = psycopg2.connect(DATABASE_URL, sslmode='require')
             cur = conn.cursor()
             
+            # جلب أحدث خبر واحد فقط لم يتم نشره
             query = """
                 SELECT id, news_url, title, full_text, media_url, pub_date 
                 FROM posted_news 
                 WHERE status = 'pending' AND source = 'sana'
                 ORDER BY pub_date DESC, id DESC 
-                LIMIT 2
+                LIMIT 1
             """
             cur.execute(query)
-            rows = cur.fetchall()
+            row = cur.fetchone()
             
-            for row in rows:
+            if row:
                 news_id, news_link, news_title, full_text, media_url, pub_date = row
                 if send_to_telegram(news_title, full_text, news_link, media_url, pub_date):
                     cur.execute("UPDATE posted_news SET status = 'sent' WHERE id = %s", (news_id,))
                     conn.commit()
-                    logging.info(f"Scheduled tourism Sana post sent: {news_title}")
-                time.sleep(3)
+                    logging.info(f"Scheduled verified tourism Sana post sent: {news_title}")
                     
             cur.close()
             conn.close()
         except Exception as e:
             logging.error(f"Error in scheduled publisher worker: {e}")
-
-def background_scraper_worker():
-    while True:
-        fetch_and_store_news()
+            
+        # الانتظار لمدة ساعة كاملة (3600 ثانية)
         time.sleep(3600)
 
 def start_background_tasks():
     init_db()
+    # جلب مبدئي للبيانات عند بدء التشغيل
     fetch_and_store_news()
     
     threading.Thread(target=send_immediate_sample_posts, daemon=True).start()
-    threading.Thread(target=background_scraper_worker, daemon=True).start()
-    threading.Thread(target=alternating_publisher_worker, daemon=True).start()
+    # تشغيل عامل النشر الذي يعمل كل ساعة
+    threading.Thread(target=hourly_publisher_worker, daemon=True).start()
 
 start_background_tasks()
 
