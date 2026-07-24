@@ -23,13 +23,13 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return {"status": "active", "message": "Syrian Tourism Precise Scraper Bot is running!"}, 200
+    return {"status": "active", "message": "Syrian Tourism Bot is running perfectly!"}, 200
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-# قائمة المصادر المعتمدة
+# قائمة المصادر المعتمدة بعد إزالة المواقع التي تسبب حظراً (الوطن وتوريزم ديلي نيوز)
 SOURCES = [
     {"name": "وزارة السياحة السورية (القرارات الرسمية والملفات)", "type": "mots"},
     {"name": "وكالة الأنباء السورية - سانا (قسم السياحة)", "type": "sana"},
@@ -38,8 +38,6 @@ SOURCES = [
     {"name": "موقع سيرياستيبس (قسم السياحة)", "type": "syriasteps"},
     {"name": "موقع سيريان ديز (قسم السياحة)", "type": "syriandays"},
     {"name": "موقع جهينة نيوز (قسم السياحة في سوريا)", "type": "jpnews"},
-    {"name": "موقع توريزم ديلي نيوز (السياحة العالمية)", "type": "tourism_global"},
-    {"name": "جريدة الوطن (أخبار محلية واقتصادية)", "type": "alwatan"},
     {"name": "جريدة الثورة (أخبار محلية)", "type": "thawra"}
 ]
 
@@ -47,7 +45,7 @@ current_source_index = 0
 
 def get_robust_session():
     session = requests.Session()
-    retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+    retries = Retry(total=2, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
     session.mount('https://', HTTPAdapter(max_retries=retries))
     session.mount('http://', HTTPAdapter(max_retries=retries))
     return session
@@ -62,25 +60,23 @@ def init_db():
     try:
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
         cur = conn.cursor()
+        # تم تغيير اسم الجدول إلى news_db_v2 لضمان تجاهل الذاكرة القديمة وإرسال الأخبار الحالية فوراً
         cur.execute('''
-            CREATE TABLE IF NOT EXISTS posted_news (
+            CREATE TABLE IF NOT EXISTS news_db_v2 (
                 id SERIAL PRIMARY KEY,
                 news_url TEXT UNIQUE,
                 title TEXT,
                 source TEXT DEFAULT '',
                 pub_date TEXT DEFAULT '',
+                full_text TEXT,
+                media_url TEXT,
                 status TEXT DEFAULT 'pending'
             )
         ''')
-        cur.execute("ALTER TABLE posted_news ADD COLUMN IF NOT EXISTS full_text TEXT;")
-        cur.execute("ALTER TABLE posted_news ADD COLUMN IF NOT EXISTS media_url TEXT;")
-        cur.execute("ALTER TABLE posted_news ADD COLUMN IF NOT EXISTS source TEXT DEFAULT '';")
-        cur.execute("ALTER TABLE posted_news ADD COLUMN IF NOT EXISTS pub_date TEXT DEFAULT '';")
-        
         conn.commit()
         cur.close()
         conn.close()
-        logging.info("Database initialized successfully.")
+        logging.info("Database V2 initialized successfully.")
     except Exception as e:
         logging.error(f"Error initializing database: {e}")
 
@@ -93,7 +89,6 @@ def clean_text_content(text):
 
 def send_to_telegram(title, full_text, link, media_url, pub_date="", source=""):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
-        logging.error("Telegram credentials are missing!")
         return False
     
     is_pdf = media_url and media_url.lower().endswith('.pdf')
@@ -106,8 +101,6 @@ def send_to_telegram(title, full_text, link, media_url, pub_date="", source=""):
         'syriasteps': ("موقع سيرياستيبس (قسم السياحة)", "#سيرياستيبس #اقتصاد_وسياحة", "عنوان الخبر:"),
         'syriandays': ("موقع سيريان ديز (قسم السياحة)", "#سيريان_ديز #فعاليات_سياحية", "عنوان الخبر:"),
         'jpnews': ("موقع جهينة نيوز", "#جهينة_نيوز #محليات_سياحية", "عنوان الخبر:"),
-        'tourism_global': ("موقع توريزم ديلي نيوز", "#توريزم_ديلي_نيوز #سياحة_عالمية", "عنوان الخبر:"),
-        'alwatan': ("جريدة الوطن", "#جريدة_الوطن #تقارير_سياحية", "عنوان الخبر:"),
         'thawra': ("جريدة الثورة", "#جريدة_الثورة #أخبار_محلية", "عنوان الخبر:")
     }
     
@@ -138,11 +131,11 @@ def send_to_telegram(title, full_text, link, media_url, pub_date="", source=""):
         session = get_robust_session()
         sent = False
         if is_pdf:
-            res = session.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument", json={"chat_id": TELEGRAM_CHANNEL_ID, "document": media_url, "caption": caption, "parse_mode": "Markdown"}, timeout=30)
+            res = session.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument", json={"chat_id": TELEGRAM_CHANNEL_ID, "document": media_url, "caption": caption, "parse_mode": "Markdown"}, timeout=15)
             if res.status_code == 200: sent = True
         
         if not sent and media_url and not is_pdf:
-            res = session.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto", json={"chat_id": TELEGRAM_CHANNEL_ID, "photo": media_url, "caption": caption, "parse_mode": "Markdown"}, timeout=30)
+            res = session.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto", json={"chat_id": TELEGRAM_CHANNEL_ID, "photo": media_url, "caption": caption, "parse_mode": "Markdown"}, timeout=15)
             if res.status_code == 200: sent = True
 
         if not sent:
@@ -159,11 +152,11 @@ def save_to_db(news_url, title, full_text, source_key, media_url=None):
     try:
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
         cur = conn.cursor()
-        cur.execute("SELECT id FROM posted_news WHERE news_url = %s", (news_url,))
+        cur.execute("SELECT id FROM news_db_v2 WHERE news_url = %s", (news_url,))
         if not cur.fetchone():
             pub_date = datetime.now().strftime("%Y/%m/%d %I:%M %p")
             cur.execute(
-                "INSERT INTO posted_news (news_url, title, full_text, media_url, source, pub_date, status) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                "INSERT INTO news_db_v2 (news_url, title, full_text, media_url, source, pub_date, status) VALUES (%s, %s, %s, %s, %s, %s, %s)",
                 (news_url, title, full_text, media_url, source_key, pub_date, 'pending')
             )
             conn.commit()
@@ -172,7 +165,7 @@ def save_to_db(news_url, title, full_text, source_key, media_url=None):
     except Exception as e:
         logging.error(f"DB save error: {e}")
 
-# --- الدوال الدقيقة والمخصصة لكل موقع ---
+# --- دوال الجلب الدقيقة ---
 
 def fetch_mots_pdfs():
     session = get_robust_session()
@@ -183,12 +176,14 @@ def fetch_mots_pdfs():
             resp = session.get(page, headers=HEADERS, timeout=15, verify=False)
             if resp.status_code == 200:
                 soup = BeautifulSoup(resp.text, 'html.parser')
+                count = 0
                 for l in soup.find_all('a', href=True):
                     href = l['href']
-                    if '.pdf' in href.lower():
+                    if '.pdf' in href.lower() and count < 3:
                         pdf_link = urljoin(page, href)
                         title = l.get_text(strip=True) or "وثيقة رسمية من وزارة السياحة"
                         save_to_db(pdf_link, title, f"ملف تعميم أو قرار رسمي صادر عن وزارة السياحة بعنوان: {title}", 'mots', pdf_link)
+                        count += 1
         except Exception as e:
             logging.warning(f"MOTS error: {e}")
 
@@ -198,40 +193,17 @@ def fetch_sana_news():
         resp = session.get("https://sana.sy/tourism/", headers=HEADERS, timeout=15)
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, 'html.parser')
+            count = 0
             for art in soup.find_all(['h3', 'h2'], class_=['entry-title', 'post-title']):
+                if count >= 3: break
                 a = art.find('a')
                 if a and a.get('href'):
                     link = a['href']
                     title = a.get_text(strip=True)
                     save_to_db(link, title, f"تقرير من وكالة سانا السياحية: {title}", 'sana')
+                    count += 1
     except Exception as e:
         logging.error(f"Sana error: {e}")
-
-def fetch_enab_news():
-    session = get_robust_session()
-    try:
-        resp = session.get("https://www.enabbaladi.net/category/mix/tourism/", headers=HEADERS, timeout=15, verify=False)
-        if resp.status_code == 200:
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            for h in soup.find_all(['h2', 'h3'], class_=['title', 'post-title', 'entry-title']):
-                a = h.find('a')
-                if a and a.get('href'):
-                    save_to_db(a['href'], a.get_text(strip=True), f"تغطية سياحية من عنب بلدي: {a.get_text(strip=True)}", 'enab')
-    except Exception as e:
-        logging.error(f"Enab error: {e}")
-
-def fetch_syriatv_news():
-    session = get_robust_session()
-    try:
-        resp = session.get("https://www.syria.tv/tag/السياحة", headers=HEADERS, timeout=15, verify=False)
-        if resp.status_code == 200:
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            for a in soup.find_all('a', href=True):
-                if '/article/' in a['href'] and len(a.get_text(strip=True)) > 20:
-                    link = urljoin("https://www.syria.tv", a['href'])
-                    save_to_db(link, a.get_text(strip=True), f"تقرير وتغطية من تلفزيون سوريا.", 'syriatv')
-    except Exception as e:
-        logging.error(f"SyriaTV error: {e}")
 
 def fetch_general_source(name, key, url, selector_tag='a'):
     session = get_robust_session()
@@ -239,59 +211,61 @@ def fetch_general_source(name, key, url, selector_tag='a'):
         resp = session.get(url, headers=HEADERS, timeout=15, verify=False)
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, 'html.parser')
+            count = 0
             for item in soup.find_all(selector_tag, href=True):
+                if count >= 2: break # جلب أول خبرين فقط لتجنب الإغراق
                 title = item.get_text(strip=True)
                 link = item['href']
-                if len(title) > 25 and ('http' in link or '/' in link):
+                if len(title) > 25 and ('http' in link or '/' in link) and 'pdf' not in link.lower():
                     full_link = urljoin(url, link)
                     save_to_db(full_link, title, f"متابعة ميدانية واقتصادية سياحية عبر {name}.", key)
+                    count += 1
     except Exception as e:
         logging.error(f"{name} error: {e}")
 
 # --- الموجه الخلفي (Background Worker) ---
 def background_worker():
-    time.sleep(10)
+    time.sleep(5) # بدء العمل سريعاً
     global current_source_index
     while True:
         try:
             active = SOURCES[current_source_index]
             stype = active["type"]
-            logging.info(f"Running precise scraper for: {active['name']}")
+            logging.info(f"Scraping: {active['name']}")
             
             if stype == 'mots': fetch_mots_pdfs()
             elif stype == 'sana': fetch_sana_news()
-            elif stype == 'enab': fetch_enab_news()
-            elif stype == 'syriatv': fetch_syriatv_news()
+            elif stype == 'enab': fetch_general_source("عنب بلدي", "enab", "https://www.enabbaladi.net/category/mix/tourism/")
+            elif stype == 'syriatv': fetch_general_source("تلفزيون سوريا", "syriatv", "https://www.syria.tv/tag/السياحة")
             elif stype == 'syriasteps': fetch_general_source("سيرياستيبس", "syriasteps", "https://www.syriasteps.com/index.php?m=154")
             elif stype == 'syriandays': fetch_general_source("سيريان ديز", "syriandays", "https://www.syriandays.com/index.php?page=show&select_page=52")
             elif stype == 'jpnews': fetch_general_source("جهينة نيوز", "jpnews", "https://jpnews-sy.com/ar/cats.php?subcat=31")
-            elif stype == 'tourism_global': fetch_general_source("توريزم ديلي نيوز", "tourism_global", "https://tourismdailynews.com/")
-            elif stype == 'alwatan': fetch_general_source("جريدة الوطن", "alwatan", "https://alwatan.sy/")
             elif stype == 'thawra': fetch_general_source("جريدة الثورة", "thawra", "https://thawra.sy/")
 
             current_source_index = (current_source_index + 1) % len(SOURCES)
 
-            # معالجة الأخبار المعلقة ونشرها
+            # معالجة الأخبار المعلقة ونشرها (تم زيادة العدد إلى 8 لتسريع تفريغ الذاكرة فوراً)
             conn = psycopg2.connect(DATABASE_URL, sslmode='require')
             cur = conn.cursor()
-            cur.execute("SELECT id, news_url, title, full_text, media_url, pub_date, source FROM posted_news WHERE status = 'pending' ORDER BY id ASC LIMIT 3")
+            cur.execute("SELECT id, news_url, title, full_text, media_url, pub_date, source FROM news_db_v2 WHERE status = 'pending' ORDER BY id ASC LIMIT 8")
             rows = cur.fetchall()
             for r in rows:
                 nid, nlink, ntitle, ntext, nmedia, ndate, nsource = r
                 if send_to_telegram(ntitle, ntext, nlink, nmedia, ndate, nsource):
-                    cur.execute("UPDATE posted_news SET status = 'sent' WHERE id = %s", (nid,))
+                    cur.execute("UPDATE news_db_v2 SET status = 'sent' WHERE id = %s", (nid,))
                     conn.commit()
-                    time.sleep(2)
+                    time.sleep(2) # استراحة قصيرة بين الرسالة والأخرى لتجنب حظر تيليجرام
             cur.close()
             conn.close()
         except Exception as e:
             logging.error(f"Worker cycle error: {e}")
         
-        # الانتظار لمدة دقيقتين ونصف بين دورات المصادر
-        time.sleep(150)
+        # الانتظار لمدة 60 ثانية فقط بين كل مصدر لتسريع الجلب
+        time.sleep(60)
 
 def start_bot():
     init_db()
+    # جلب مبدئي سريع لضمان عمل الإشعارات فوراً
     fetch_mots_pdfs()
     fetch_sana_news()
     threading.Thread(target=background_worker, daemon=True).start()
