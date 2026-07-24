@@ -21,7 +21,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return {"status": "active", "message": "Syrian News Bot is running perfectly!"}, 200
+    return {"status": "active", "message": "Syrian Tourism & News Bot is running perfectly!"}, 200
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID")
@@ -43,14 +43,14 @@ def init_db():
                 id SERIAL PRIMARY KEY,
                 news_url TEXT UNIQUE,
                 title TEXT,
-                source TEXT DEFAULT 'sana',
+                source TEXT DEFAULT '',
                 pub_date TEXT DEFAULT '',
                 status TEXT DEFAULT 'pending'
             )
         ''')
         cur.execute("ALTER TABLE posted_news ADD COLUMN IF NOT EXISTS full_text TEXT;")
         cur.execute("ALTER TABLE posted_news ADD COLUMN IF NOT EXISTS media_url TEXT;")
-        cur.execute("ALTER TABLE posted_news ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'sana';")
+        cur.execute("ALTER TABLE posted_news ADD COLUMN IF NOT EXISTS source TEXT DEFAULT '';")
         cur.execute("ALTER TABLE posted_news ADD COLUMN IF NOT EXISTS pub_date TEXT DEFAULT '';")
         
         conn.commit()
@@ -67,24 +67,22 @@ def clean_text_content(text):
     cleaned_lines = [l.strip() for l in lines if l.strip() and not l.strip().endswith('-سانا')]
     return "\n\n".join(cleaned_lines)
 
-def send_to_telegram(title, full_text, link, media_url, pub_date="", source="sana"):
+def send_to_telegram(title, full_text, link, media_url, pub_date="", source=""):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
         logging.error("Telegram credentials are missing!")
         return False
     
-    # التسميات الدقيقة للمصدر ونوع المسمى المطلوب
-    if "sana.sy" in link:
+    # تحديد التسمية والمصدر بناءً على نوع الرابط (PDF من السياحة أو تقرير من سانا)
+    is_pdf = media_url and media_url.lower().endswith('.pdf')
+    
+    if is_pdf:
+        source_label = "وزارة السياحة السورية (التعاميم والقرارات الرسمية)"
+        source_tag = "#وزارة_السياحة"
+        title_prefix = "عنوان الملف:"
+    else:
         source_label = "وكالة الأنباء السورية - سانا (قسم السياحة)"
         source_tag = "#وكالة_سانا"
-        title_label = "عنوان التقرير"
-    elif media_url and media_url.lower().endswith('.pdf'):
-        source_label = "وزارة السياحة السورية (التعاميم والقرارات)"
-        source_tag = "#وزارة_السياحة"
-        title_label = "عنوان الملف"
-    else:
-        source_label = "وزارة السياحة السورية"
-        source_tag = "#وزارة_السياحة"
-        title_label = "عنوان المنشور"
+        title_prefix = "عنوان التقرير:"
 
     formatted_date = pub_date if pub_date else datetime.now().strftime("%Y/%m/%d %I:%M %p")
     safe_text = clean_text_content(full_text)
@@ -94,11 +92,11 @@ def send_to_telegram(title, full_text, link, media_url, pub_date="", source="san
     if len(safe_text) > 700:
         safe_text = safe_text[:700] + "..."
 
-    # هيكل المنشور بالتنسيق المطلوب تماماً
+    # هيكل المنشور بالتنسيق المطلوب بدقة
     caption = (
         f"مصدر المنشور: {source_label}\n"
         f"تاريخ النشر: {formatted_date}\n\n"
-        f"{title}\n\n"
+        f"{title_prefix}\n{title}\n\n"
         f"{safe_text}\n\n"
         f"يمكنكم متابعة تفاصيل الخبر رسمياً عبر الرابط أدناه:\n"
         f"{link}\n\n"
@@ -109,8 +107,8 @@ def send_to_telegram(title, full_text, link, media_url, pub_date="", source="san
         session = get_robust_session()
         sent_successfully = False
         
-        # إرسال ملف PDF حصرياً كمستند مباشر إذا وجد رابط ملف حقيقي
-        if media_url and media_url.lower().endswith('.pdf'):
+        # إرسال ملف PDF كمستند مباشر إذا وجد رابط ملف حقيقي
+        if is_pdf:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
             payload = {
                 "chat_id": TELEGRAM_CHANNEL_ID,
@@ -121,7 +119,7 @@ def send_to_telegram(title, full_text, link, media_url, pub_date="", source="san
             if response.status_code == 200:
                 sent_successfully = True
 
-        # الإرسال كنص مباشر للتقارير والأخبار الصحفية
+        # إرسال كنص للتقارير والأخبار العادية
         if not sent_successfully:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             payload = {
@@ -138,8 +136,38 @@ def send_to_telegram(title, full_text, link, media_url, pub_date="", source="san
         logging.error(f"Exception while sending to Telegram: {e}")
         return False
 
+def fetch_mots_pdfs():
+    """البحث عن ملفات PDF مباشرة في موقع وزارة السياحة"""
+    session = get_robust_session()
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    base_url = "https://mots.gov.sy/"
+    try:
+        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+        cur = conn.cursor()
+        response = session.get(base_url, headers=headers, timeout=20, verify=False)
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            for l in soup.find_all('a'):
+                href = l.get('href')
+                title = l.get_text(strip=True)
+                if href and '.pdf' in href.lower() and len(title) > 5:
+                    pdf_link = href if href.startswith('http') else base_url + href.lstrip('/')
+                    pub_date = datetime.now().strftime("%Y/%m/%d %I:%M %p")
+                    
+                    cur.execute("SELECT id FROM posted_news WHERE news_url = %s", (pdf_link,))
+                    if not cur.fetchone():
+                        cur.execute(
+                            "INSERT INTO posted_news (news_url, title, full_text, media_url, source, pub_date, status) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                            (pdf_link, title, f"ملف تعميم أو قرار صادر عن وزارة السياحة بعنوان: {title}", pdf_link, 'mots', pub_date, 'pending')
+                        )
+                        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        logging.error(f"Error fetching MOTS PDFs: {e}")
+
 def fetch_sana_news():
-    """جلب التقارير والأخبار مباشرة من موقع وكالة سانا قسم السياحة مع تاريخ النشر الفعلي"""
+    """جلب التقارير والأخبار من وكالة سانا"""
     session = get_robust_session()
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
@@ -185,12 +213,14 @@ def background_worker():
     time.sleep(30)
     while True:
         try:
+            fetch_mots_pdfs()
             fetch_sana_news()
             
             conn = psycopg2.connect(DATABASE_URL, sslmode='require')
             cur = conn.cursor()
             
-            cur.execute("SELECT id, news_url, title, full_text, media_url, pub_date, source FROM posted_news WHERE status = 'pending' ORDER BY id ASC LIMIT 1")
+            # إعطاء الأولوية لملفات الـ PDF إذا توفرت لتنفيذها أولاً
+            cur.execute("SELECT id, news_url, title, full_text, media_url, pub_date, source FROM posted_news WHERE status = 'pending' ORDER BY CASE WHEN media_url LIKE '%.pdf' THEN 1 ELSE 2 END, id ASC LIMIT 1")
             row = cur.fetchone()
             if row:
                 news_id, news_link, news_title, full_text, media_url, pub_date, source = row
@@ -205,6 +235,7 @@ def background_worker():
 
 def start_bot():
     init_db()
+    fetch_mots_pdfs()
     fetch_sana_news()
     threading.Thread(target=background_worker, daemon=True).start()
 
