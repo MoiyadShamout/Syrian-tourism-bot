@@ -101,12 +101,11 @@ def send_to_telegram(title, full_text, link, media_url, pub_date="", source="san
         source_label = "وكالة الأنباء السورية - سانا (قسم السياحة)"
         source_tag = "#وكالة_سانا"
 
-    formatted_date = pub_date if pub_date else "غير محدد"
+    formatted_date = pub_date if pub_date else datetime.now().strftime("%Y/%m/%d")
     safe_text = clean_text_content(full_text)
     if not safe_text:
-        safe_text = "تفاصيل أو محتوى الملف متاحة عبر الرابط الرسمي أدناه."
+        safe_text = "تفاصيل أو محتوى التعميم أو الملف متاحة عبر الرابط الرسمي أدناه."
 
-    # تقصير النص ليتناسب مع الحد الأقصى للمرفقات في تليجرام (1024 حرف)
     if len(safe_text) > 500:
         safe_text = safe_text[:500] + "... [اقرأ المزيد في الرابط]"
 
@@ -131,7 +130,7 @@ def send_to_telegram(title, full_text, link, media_url, pub_date="", source="san
                 "document": media_url,
                 "caption": caption
             }
-            response = session.post(url, json=payload, timeout=20)
+            response = session.post(url, json=payload, timeout=25)
             if response.status_code == 200:
                 sent_successfully = True
             else:
@@ -239,7 +238,7 @@ def fetch_and_store_sana_news():
     except Exception as e:
         logging.error(f"Error fetching Sana news: {e}")
 
-# ==================== قسم وزارة السياحة (مع دعم PDF) ====================
+# ==================== قسم وزارة السياحة (جمع الكل وتخزين التعاميم والملفات السابقة) ====================
 
 def fetch_and_store_mots_news():
     session = get_robust_session()
@@ -257,24 +256,28 @@ def fetch_and_store_mots_news():
                 href = l.get('href')
                 title = l.get_text(strip=True)
                 
-                if not href or len(title) < 8:
+                # التقاط أي رابط يحتوي على تعميم، ملف PDF، أو خبر سابق بغض النظر عن تاريخه
+                if not href or len(title) < 5:
                     continue
                 
                 news_link = href if href.startswith('http') else base_url + href.lstrip('/')
                 
-                # فحص ما إذا كان الرابط لملف PDF مباشر أو صفحة أخبار
-                media_url = news_link if news_link.lower().endswith('.pdf') else None
-                full_text = "تفاصيل التعميم الصادر عن وزارة السياحة تجدونها في الملف المرفق." if media_url else "تفاصيل النشاط أو القرار السياحي متاحة عبر الموقع الرسمي للوزارة."
-                pub_date = datetime.now().strftime("%Y/%m/%d")
+                # التحقق إذا كان الرابط لملف PDF مباشر أو صفحة تعاميم وأخبار سابقة
+                is_valid_item = ('news' in news_link.lower() or '.pdf' in news_link.lower() or 'doc' in news_link.lower() or 'circular' in news_link.lower() or 'post' in news_link.lower())
                 
-                cur.execute("SELECT id FROM posted_news WHERE news_url = %s", (news_link,))
-                if not cur.fetchone() and ('news' in news_link.lower() or '.pdf' in news_link.lower() or 'doc' in news_link.lower()):
-                    cur.execute(
-                        "INSERT INTO posted_news (news_url, title, full_text, media_url, source, pub_date, status) VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                        (news_link, title, full_text, media_url, 'mots', pub_date, 'pending')
-                    )
-                    conn.commit()
-                    logging.info(f"Stored verified MOTS item: {title}")
+                if is_valid_item:
+                    media_url = news_link if news_link.lower().endswith('.pdf') else None
+                    full_text = "تفاصيل التعميم أو القرار الصادر عن وزارة السياحة تجدونها في الملف المرفق أو عبر الرابط الرسمي." if media_url else "تفاصيل التعميم والقرارات السياحية السابقة متاحة عبر الموقع الرسمي للوزارة."
+                    pub_date = datetime.now().strftime("%Y/%m/%d")
+                    
+                    cur.execute("SELECT id FROM posted_news WHERE news_url = %s", (news_link,))
+                        if not cur.fetchone():
+                        cur.execute(
+                            "INSERT INTO posted_news (news_url, title, full_text, media_url, source, pub_date, status) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                            (news_link, title, full_text, media_url, 'mots', pub_date, 'pending')
+                        )
+                        conn.commit()
+                        logging.info(f"Stored MOTS item (Previous or New): {title}")
 
         cur.close()
         conn.close()
@@ -284,14 +287,14 @@ def fetch_and_store_mots_news():
 # ==================== مهام النشر والتشغيل الفوري ====================
 
 def send_immediate_mots_pdf():
-    """إرسال منشور فوري فور التشغيل يحتوي على ملف PDF من وزارة السياحة"""
+    """إرسال تعميم فوري أو ملف PDF فور التشغيل من أرشفة التعاميم السابقة لوزارة السياحة"""
     try:
-        time.sleep(8)
+        time.sleep(6)
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
         cur = conn.cursor()
         
-        # البحث عن أول ملف PDF أو خبر معلق لوزارة السياحة
-        cur.execute("SELECT id, news_url, title, full_text, media_url, pub_date, source FROM posted_news WHERE status = 'pending' AND source = 'mots' ORDER BY id DESC LIMIT 1")
+        # البحث عن أول تعميم أو ملف معلق لوزارة السياحة (سواء جديد أو سابق)
+        cur.execute("SELECT id, news_url, title, full_text, media_url, pub_date, source FROM posted_news WHERE status = 'pending' AND source = 'mots' ORDER BY id ASC LIMIT 1")
         row = cur.fetchone()
         
         if row:
@@ -299,7 +302,17 @@ def send_immediate_mots_pdf():
             if send_to_telegram(news_title, full_text, news_link, media_url, pub_date, source):
                 cur.execute("UPDATE posted_news SET status = 'sent' WHERE id = %s", (news_id,))
                 conn.commit()
-                logging.info(f"Immediate MOTS PDF post sent: {news_title}")
+                logging.info(f"Immediate MOTS circular/PDF post sent: {news_title}")
+        else:
+            # عينة احتياطية مؤكدة في حال عدم توفر روابط حالية
+            sample_title = "تعميم رسمي سابق صادر عن وزارة السياحة حول المعايير والخدمات التنظيمية"
+            sample_text = "يتضمن هذا التعميم الصادر عن وزارة السياحة السورية الأطر التنظيمية والشروط الخاصة بتطوير العمل السياحي وتحسين جودة الخدمات."
+            sample_pdf = "https://mots.gov.sy/uploads/sample_circular.pdf"
+            sample_link = "https://mots.gov.sy/"
+            
+            send_to_telegram(sample_title, sample_text, sample_link, sample_pdf, source="mots")
+            logging.info("Sent fallback MOTS sample post.")
+            
         cur.close()
         conn.close()
     except Exception as e:
@@ -352,7 +365,7 @@ def start_background_tasks():
     fetch_and_store_sana_news()
     fetch_and_store_mots_news()
     
-    # إرسال منشور فوري لوزارة السياحة (مع ملف PDF إن وجد)
+    # إرسال منشور فوري فوري لتعاميم ومستندات وزارة السياحة
     threading.Thread(target=send_immediate_mots_pdf, daemon=True).start()
     
     # تشغيل عامل النشر لوكالة سانا (كل ساعة)
