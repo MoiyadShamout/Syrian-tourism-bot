@@ -172,7 +172,6 @@ def send_to_telegram(title, full_text, link, media_url, pub_date="", source=""):
                 sent_successfully = True
 
         if not sent_successfully and media_url and not is_pdf:
-            # إرسال كصورة مع تعليق في حال توفر رابط صورة بارزة
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
             payload = {
                 "chat_id": TELEGRAM_CHANNEL_ID,
@@ -285,7 +284,6 @@ def fetch_sana_news():
         logging.error(f"Error fetching Sana news: {e}")
 
 def fetch_general_source_news(source_name, source_key, url):
-    """دالة عامة لزحف وجلب الأخبار من باقي المصادر المعتمدة وتخزينها بأولوية يوم بيومه"""
     session = get_robust_session()
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
@@ -294,7 +292,6 @@ def fetch_general_source_news(source_name, source_key, url):
         response = session.get(url, headers=headers, timeout=20, verify=False)
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
-            # استخراج الروابط والعناوين المتوافقة مع بنية المواقع
             for a_tag in soup.find_all('a', href=True):
                 news_title = a_tag.get_text(strip=True)
                 news_link = a_tag['href']
@@ -322,7 +319,6 @@ def background_worker():
     global current_source_index
     while True:
         try:
-            # التدوير الذكي بين المصادر بناءً على المؤشر الساعي
             active_source = SOURCES[current_source_index]
             source_type = active_source["type"]
             
@@ -349,27 +345,26 @@ def background_worker():
             elif source_type == 'thawra':
                 fetch_general_source_news("جريدة الثورة", "thawra", "https://thawra.sy/")
 
-            # الانتقال للمصدر التالي في الدورة القادمة
             current_source_index = (current_source_index + 1) % len(SOURCES)
 
-            # معالجة أول منشور معلق في طليعة الانتظار (مع أولوية ملفات الـ PDF والقرارات الرسمية)
             conn = psycopg2.connect(DATABASE_URL, sslmode='require')
             cur = conn.cursor()
             
-            cur.execute("SELECT id, news_url, title, full_text, media_url, pub_date, source FROM posted_news WHERE status = 'pending' ORDER BY CASE WHEN media_url LIKE '%.pdf' THEN 1 ELSE 2 END, id ASC LIMIT 1")
-            row = cur.fetchone()
-            if row:
+            cur.execute("SELECT id, news_url, title, full_text, media_url, pub_date, source FROM posted_news WHERE status = 'pending' ORDER BY CASE WHEN media_url LIKE '%.pdf' THEN 1 ELSE 2 END, id ASC LIMIT 3")
+            rows = cur.fetchall()
+            for row in rows:
                 news_id, news_link, news_title, full_text, media_url, pub_date, source = row
                 if send_to_telegram(news_title, full_text, news_link, media_url, pub_date, source):
                     cur.execute("UPDATE posted_news SET status = 'sent' WHERE id = %s", (news_id,))
                     conn.commit()
+                    time.sleep(2)
             cur.close()
             conn.close()
         except Exception as e:
             logging.error(f"Error in background worker: {e}")
         
-        # النوم لمدة ساعة تماماً (أو حسب رغبتك في النشر بمعدل منشور كل ساعة)
-        time.sleep(3600)
+        # الانتظار لمدة 5 دقائق (300 ثانية) لتسريع وتيرة فحص ونشر الأخبار
+        time.sleep(300)
 
 def start_bot():
     init_db()
