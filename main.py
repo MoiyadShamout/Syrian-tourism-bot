@@ -53,6 +53,23 @@ def init_db():
         cur.execute("ALTER TABLE posted_news ADD COLUMN IF NOT EXISTS source TEXT DEFAULT '';")
         cur.execute("ALTER TABLE posted_news ADD COLUMN IF NOT EXISTS pub_date TEXT DEFAULT '';")
         
+        # حقن عينة ملف PDF تجريبي فورياً للتأكد من وصول الملفات للتلغرام مباشرة
+        cur.execute("SELECT id FROM posted_news WHERE news_url = %s", ("https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf",))
+        if not cur.fetchone():
+            cur.execute(
+                "INSERT INTO posted_news (news_url, title, full_text, media_url, source, pub_date, status) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                (
+                    "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf",
+                    "تعميم إداري برقم 45 الصادر عن وزارة السياحة حول المعايير التنظيمية",
+                    "يحتوي هذا الملف الرسمي على تفاصيل الاشتراطات والمعايير التنظيمية الصادرة عن وزارة السياحة السورية للمنشآت والشركات السياحية.",
+                    "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf",
+                    "mots",
+                    datetime.now().strftime("%Y/%m/%d %I:%M %p"),
+                    "pending"
+                )
+            )
+            conn.commit()
+
         conn.commit()
         cur.close()
         conn.close()
@@ -72,7 +89,6 @@ def send_to_telegram(title, full_text, link, media_url, pub_date="", source=""):
         logging.error("Telegram credentials are missing!")
         return False
     
-    # تحديد التسمية والمصدر بناءً على نوع الرابط (PDF من السياحة أو تقرير من سانا)
     is_pdf = media_url and media_url.lower().endswith('.pdf')
     
     if is_pdf:
@@ -92,7 +108,6 @@ def send_to_telegram(title, full_text, link, media_url, pub_date="", source=""):
     if len(safe_text) > 700:
         safe_text = safe_text[:700] + "..."
 
-    # هيكل المنشور بالتنسيق المطلوب بدقة
     caption = (
         f"مصدر المنشور: {source_label}\n"
         f"تاريخ النشر: {formatted_date}\n\n"
@@ -107,7 +122,7 @@ def send_to_telegram(title, full_text, link, media_url, pub_date="", source=""):
         session = get_robust_session()
         sent_successfully = False
         
-        # إرسال ملف PDF كمستند مباشر إذا وجد رابط ملف حقيقي
+        # إرسال ملف الـ PDF مباشرة كـ Document ليتم تنزيله من المنشور
         if is_pdf:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
             payload = {
@@ -118,8 +133,9 @@ def send_to_telegram(title, full_text, link, media_url, pub_date="", source=""):
             response = session.post(url, json=payload, timeout=30)
             if response.status_code == 200:
                 sent_successfully = True
+            else:
+                logging.warning(f"Failed to send PDF document: {response.text}")
 
-        # إرسال كنص للتقارير والأخبار العادية
         if not sent_successfully:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             payload = {
@@ -137,7 +153,6 @@ def send_to_telegram(title, full_text, link, media_url, pub_date="", source=""):
         return False
 
 def fetch_mots_pdfs():
-    """البحث عن ملفات PDF مباشرة في موقع وزارة السياحة"""
     session = get_robust_session()
     headers = {'User-Agent': 'Mozilla/5.0'}
     base_url = "https://mots.gov.sy/"
@@ -167,7 +182,6 @@ def fetch_mots_pdfs():
         logging.error(f"Error fetching MOTS PDFs: {e}")
 
 def fetch_sana_news():
-    """جلب التقارير والأخبار من وكالة سانا"""
     session = get_robust_session()
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
@@ -210,7 +224,7 @@ def fetch_sana_news():
         logging.error(f"Error fetching Sana news: {e}")
 
 def background_worker():
-    time.sleep(30)
+    time.sleep(15)
     while True:
         try:
             fetch_mots_pdfs()
@@ -219,7 +233,7 @@ def background_worker():
             conn = psycopg2.connect(DATABASE_URL, sslmode='require')
             cur = conn.cursor()
             
-            # إعطاء الأولوية لملفات الـ PDF إذا توفرت لتنفيذها أولاً
+            # إعطاء الأولوية المطلقة لملفات الـ PDF لتظهر أولاً
             cur.execute("SELECT id, news_url, title, full_text, media_url, pub_date, source FROM posted_news WHERE status = 'pending' ORDER BY CASE WHEN media_url LIKE '%.pdf' THEN 1 ELSE 2 END, id ASC LIMIT 1")
             row = cur.fetchone()
             if row:
