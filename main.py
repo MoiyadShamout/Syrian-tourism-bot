@@ -256,13 +256,10 @@ def fetch_and_store_mots_news():
                 href = l.get('href')
                 title = l.get_text(strip=True)
                 
-                # التقاط أي رابط يحتوي على تعميم، ملف PDF، أو خبر سابق بغض النظر عن تاريخه
                 if not href or len(title) < 5:
                     continue
                 
                 news_link = href if href.startswith('http') else base_url + href.lstrip('/')
-                
-                # التحقق إذا كان الرابط لملف PDF مباشر أو صفحة تعاميم وأخبار سابقة
                 is_valid_item = ('news' in news_link.lower() or '.pdf' in news_link.lower() or 'doc' in news_link.lower() or 'circular' in news_link.lower() or 'post' in news_link.lower())
                 
                 if is_valid_item:
@@ -271,7 +268,7 @@ def fetch_and_store_mots_news():
                     pub_date = datetime.now().strftime("%Y/%m/%d")
                     
                     cur.execute("SELECT id FROM posted_news WHERE news_url = %s", (news_link,))
-                        if not cur.fetchone():
+                    if not cur.fetchone():
                         cur.execute(
                             "INSERT INTO posted_news (news_url, title, full_text, media_url, source, pub_date, status) VALUES (%s, %s, %s, %s, %s, %s, %s)",
                             (news_link, title, full_text, media_url, 'mots', pub_date, 'pending')
@@ -293,7 +290,6 @@ def send_immediate_mots_pdf():
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
         cur = conn.cursor()
         
-        # البحث عن أول تعميم أو ملف معلق لوزارة السياحة (سواء جديد أو سابق)
         cur.execute("SELECT id, news_url, title, full_text, media_url, pub_date, source FROM posted_news WHERE status = 'pending' AND source = 'mots' ORDER BY id ASC LIMIT 1")
         row = cur.fetchone()
         
@@ -304,7 +300,6 @@ def send_immediate_mots_pdf():
                 conn.commit()
                 logging.info(f"Immediate MOTS circular/PDF post sent: {news_title}")
         else:
-            # عينة احتياطية مؤكدة في حال عدم توفر روابط حالية
             sample_title = "تعميم رسمي سابق صادر عن وزارة السياحة حول المعايير والخدمات التنظيمية"
             sample_text = "يتضمن هذا التعميم الصادر عن وزارة السياحة السورية الأطر التنظيمية والشروط الخاصة بتطوير العمل السياحي وتحسين جودة الخدمات."
             sample_pdf = "https://mots.gov.sy/uploads/sample_circular.pdf"
@@ -336,7 +331,7 @@ def hourly_sana_publisher_worker():
             conn.close()
         except Exception as e:
             logging.error(f"Error in scheduled Sana publisher: {e}")
-        time.sleep(3600) # كل ساعة
+        time.sleep(3600)
 
 def mots_publisher_worker():
     time.sleep(120)
@@ -357,7 +352,6 @@ def mots_publisher_worker():
         except Exception as e:
             logging.error(f"Error in scheduled MOTS publisher: {e}")
         
-        # معدل 3 مرات يومياً لوزارة السياحة (كل 8 ساعات = 28800 ثانية)
         time.sleep(28800)
 
 def start_background_tasks():
@@ -365,13 +359,8 @@ def start_background_tasks():
     fetch_and_store_sana_news()
     fetch_and_store_mots_news()
     
-    # إرسال منشور فوري فوري لتعاميم ومستندات وزارة السياحة
     threading.Thread(target=send_immediate_mots_pdf, daemon=True).start()
-    
-    # تشغيل عامل النشر لوكالة سانا (كل ساعة)
     threading.Thread(target=hourly_sana_publisher_worker, daemon=True).start()
-    
-    # تشغيل عامل النشر لوزارة السياحة (3 مرات يومياً)
     threading.Thread(target=mots_publisher_worker, daemon=True).start()
 
 start_background_tasks()
