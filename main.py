@@ -10,6 +10,7 @@ from bs4 import BeautifulSoup
 import psycopg2
 from flask import Flask
 import urllib3
+from urllib.parse import urljoin, urlparse
 
 # إخفاء تحذيرات شهادات الأمان
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -133,60 +134,36 @@ def send_to_telegram(title, full_text, link, media_url, pub_date="", source=""):
         return False
 
 def fetch_mots_pdfs():
-    """زحف تلقائي شامل لكافة أقسام وصفحات موقع وزارة السياحة لاستخراج أي ملفات PDF جديدة"""
+    """زحف تلقائي وتطهير كامل للروابط لتجنب أي مسارات غير صحيحة"""
     session = get_robust_session()
     headers = {'User-Agent': 'Mozilla/5.0'}
     base_url = "https://mots.gov.sy/"
     
-    visited_pages = set()
-    pages_to_visit = [base_url]
+    target_pages = [
+        base_url,
+        "https://mots.gov.sy/page/97281/قوانين-المكاتب-والمؤسسات",
+        "https://mots.gov.sy/page/97282/قانون-المكاتب-السياحية",
+        "https://mots.gov.sy/page/97387/الاتفاقيات-ومذكرات",
+        "https://mots.gov.sy/page/97299/احصائيات-معتمدة",
+        "https://mots.gov.sy/page/97176/مديرية-التدريب-والتأهيل",
+        "https://mots.gov.sy/page/97171/مديرية-الشؤون-التعليمية"
+    ]
     
     try:
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
         cur = conn.cursor()
         
-        # الخطوة الأولى: جمع الروابط الداخلية للأقسام والصفحات من الموقع بشكل عام
-        resp = session.get(base_url, headers=headers, timeout=20, verify=False)
-        if resp.status_code == 200:
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            for l in soup.find_all('a', href=True):
-                href = l['href']
-                full_link = href if href.startswith('http') else base_url.rstrip('/') + '/' + href.lstrip('/')
-                
-                # التأكد من أن الرابط يتبع لنطاق الوزارة ولا يشير لملف مكرر أو خارجي
-                if "mots.gov.sy" in full_link and full_link not in visited_pages:
-                    if '.pdf' in full_link.lower():
-                        # معالجة مباشرة إذا وجد ملف PDF في الصفحة الرئيسية
-                        title = l.get_text(strip=True)
-                        clean_title = title if len(title) > 5 else "وثيقة رسمية صادرة عن وزارة السياحة السورية"
-                        pub_date = datetime.now().strftime("%Y/%m/%d %I:%M %p")
-                        
-                        cur.execute("SELECT id FROM posted_news WHERE news_url = %s", (full_link,))
-                        if not cur.fetchone():
-                            cur.execute(
-                                "INSERT INTO posted_news (news_url, title, full_text, media_url, source, pub_date, status) VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                                (full_link, clean_title, f"ملف تعميم أو قرار رسمي صادر عن وزارة السياحة بعنوان: {clean_title}", full_link, 'mots', pub_date, 'pending')
-                            )
-                            conn.commit()
-                    elif '/page/' in full_link or 'invest' in full_link or 'guide' in full_link:
-                        if full_link not in pages_to_visit:
-                            pages_to_visit.append(full_link)
-
-        # الخطوة الثانية: تصفح كل الأقسام والصفحات الفرعية المكتشفة والبحث عن ملفات الـ PDF بداخلها
-        for page_url in pages_to_visit[:30]: # تحديد سقف بعدد الصفحات لضمان سرعة التنفيذ
-            if page_url in visited_pages:
-                continue
-            visited_pages.add(page_url)
-            
+        for page_url in target_pages:
             try:
-                sub_resp = session.get(page_url, headers=headers, timeout=15, verify=False)
-                if sub_resp.status_code == 200:
-                    sub_soup = BeautifulSoup(sub_resp.text, 'html.parser')
-                    for l in sub_soup.find_all('a', href=True):
+                response = session.get(page_url, headers=headers, timeout=20, verify=False)
+                if response.status_code == 200:
+                    soup = BeautifulSoup(response.text, 'html.parser')
+                    for l in soup.find_all('a', href=True):
                         href = l['href']
-                        title = l.get_text(strip=True)
                         if '.pdf' in href.lower():
-                            pdf_link = href if href.startswith('http') else base_url.rstrip('/') + '/' + href.lstrip('/')
+                            # استخدام urljoin لتنظيف الرابط وجعله مثالياً وخالياً من الفوضى
+                            pdf_link = urljoin(page_url, href)
+                            title = l.get_text(strip=True)
                             pub_date = datetime.now().strftime("%Y/%m/%d %I:%M %p")
                             clean_title = title if len(title) > 5 else "وثيقة رسمية صادرة عن وزارة السياحة السورية"
                             
@@ -197,8 +174,8 @@ def fetch_mots_pdfs():
                                     (pdf_link, clean_title, f"ملف تعميم أو قرار رسمي صادر عن وزارة السياحة بعنوان: {clean_title}", pdf_link, 'mots', pub_date, 'pending')
                                 )
                                 conn.commit()
-            except Exception as sub_e:
-                logging.warning(f"Skipping page {page_url} due to error: {sub_e}")
+            except Exception as page_err:
+                logging.warning(f"Error reading page {page_url}: {page_err}")
                 
         cur.close()
         conn.close()
@@ -257,7 +234,6 @@ def background_worker():
             conn = psycopg2.connect(DATABASE_URL, sslmode='require')
             cur = conn.cursor()
             
-            # إعطاء الأولوية المطلقة لملفات الـ PDF لتظهر أولاً
             cur.execute("SELECT id, news_url, title, full_text, media_url, pub_date, source FROM posted_news WHERE status = 'pending' ORDER BY CASE WHEN media_url LIKE '%.pdf' THEN 1 ELSE 2 END, id ASC LIMIT 1")
             row = cur.fetchone()
             if row:
