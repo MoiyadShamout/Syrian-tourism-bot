@@ -60,12 +60,11 @@ def init_db():
     except Exception as e:
         logging.error(f"Error initializing database: {e}")
 
-# دالة تنظيف النص وإزالة التكرارات المتتالية
+# دالة تنظيف النص وإزالة التكرارات المتتالية وكلمات الوكالة
 def clean_text_content(text):
     if not text:
         return ""
     
-    # تقسيم النص إلى أسطر
     lines = text.split('\n')
     cleaned_lines = []
     seen_lines = set()
@@ -74,7 +73,11 @@ def clean_text_content(text):
         stripped = line.strip()
         if not stripped:
             continue
-        # منع تكرار نفس السطر متتالياً أو تكرار العبارات الخدمية المكررة
+        
+        # حذف العبارات التمهيدية مثل "دمشق-سانا" أو أي مدينة متبوعة بـ "-سانا"
+        if stripped.endswith('-سانا') and len(stripped) < 30:
+            continue
+            
         if stripped not in seen_lines or len(stripped) > 50:
             cleaned_lines.append(stripped)
             seen_lines.add(stripped)
@@ -112,8 +115,8 @@ def send_to_telegram(title, full_text, link, media_url, pub_date=""):
         session = get_robust_session()
         sent_successfully = False
         
-        # محاولة إرسال الصورة إذا كانت صالحة تماماً
-        if media_url and media_url.startswith('http') and ('sana.sy' in media_url or 'wp-content' in media_url):
+        # إرسال الصورة بعد إصلاح الروابط النسبية
+        if media_url and media_url.startswith('http'):
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
             payload = {
                 "chat_id": TELEGRAM_CHANNEL_ID,
@@ -126,7 +129,7 @@ def send_to_telegram(title, full_text, link, media_url, pub_date=""):
             else:
                 logging.warning(f"Photo rejected by Telegram, falling back to text: {response.text}")
 
-        # إذا فشلت الصورة أو لم تكن موجودة، يتم إرسالها كنص آمن
+        # الإرسال كنص إذا لم تنجح الصورة (أو إذا كان المحتوى فيديو غير مدعوم كصورة)
         if not sent_successfully:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             payload = {
@@ -168,33 +171,25 @@ def fetch_sana_article_details(article_url):
                 main_img = soup.select_one('.single-post-thumb img, .entry-header img, .post-thumbnail img, .wp-post-image')
                 if main_img and main_img.get('src'):
                     media_url = main_img.get('src')
+                    
+            # إصلاح مسارات الصور النسبية 
+            if media_url:
+                if media_url.startswith('/'):
+                    media_url = "https://sana.sy" + media_url
+                elif not media_url.startswith('http'):
+                    media_url = "https://sana.sy/" + media_url
 
             content_div = soup.find('div', class_='entry-content') or soup.find('div', class_='post-content')
             if content_div:
-                location_prefix = ""
                 paragraphs = content_div.find_all('p')
-                
                 cleaned_paragraphs = []
                 for p in paragraphs:
                     p_text = p.get_text(strip=True)
-                    if not p_text:
-                        continue
-                    if not location_prefix and ('سانا' in p_text) and len(p_text) < 40:
-                        location_prefix = p_text
-                        for prefix_candidate in ["دمشق-سانا", "حلب-سانا", "حمص-سانا", "اللاذقية-سانا", "طرطوس-سانا", "حماة-سانا", "دير الزور-سانا", "الحسكة-سانا", "الرقة-سانا", "درعا-سانا", "السويداء-سانا", "القنيطرة-سانا", "إدلب-سانا"]:
-                            if p_text.startswith(prefix_candidate):
-                                location_prefix = prefix_candidate
-                                p_text = p_text[len(prefix_candidate):].strip()
-                                break
-                        if p_text:
-                            cleaned_paragraphs.append(p_text)
-                    else:
+                    if p_text:
                         cleaned_paragraphs.append(p_text)
 
                 body_text = "\n\n".join(cleaned_paragraphs)
-                full_text = f"{location_prefix}\n\n{body_text}" if location_prefix else body_text
-                if not full_text:
-                    full_text = content_div.get_text(strip=True)
+                full_text = body_text if body_text else content_div.get_text(strip=True)
             else:
                 full_text = "تفاصيل الخبر متاحة عبر الرابط الرسمي أدناه."
 
@@ -221,7 +216,6 @@ def fetch_and_store_news():
             response = session.get(sana_url, headers=headers, timeout=20)
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, 'html.parser')
-                # استهداف العناصر التي تحتوي على روابط المقالات ضمن الصفحة
                 articles = soup.find_all('h3', class_='entry-title') or soup.find_all('h2', class_='entry-title') or soup.find_all('a', class_='item-title')
                 
                 for art in articles:
@@ -230,7 +224,6 @@ def fetch_and_store_news():
                         news_link = link_tag['href']
                         news_title = link_tag.get_text(strip=True)
                         
-                        # فلترة صارمة للغاية: يجب أن يحتوي الرابط على كلمة /tourism/ حصراً ولا ينتمي لأي قسم آخر
                         if not news_link or '/tourism/' not in news_link or '/economy/' in news_link or '/politics/' in news_link or '/en/' in news_link:
                             continue
                         
@@ -253,7 +246,8 @@ def fetch_and_store_news():
 # إرسال عينة فورية عند التشغيل
 def send_immediate_sample_posts():
     try:
-        time.sleep(5)
+        # تأخير بسيط لضمان اكتمال بناء الجداول وجلب أول دفعة أخبار
+        time.sleep(10)
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
         cur = conn.cursor()
 
@@ -272,11 +266,14 @@ def send_immediate_sample_posts():
     except Exception as e:
         logging.error(f"Error in sending immediate sample: {e}")
 
-# عامل النشر الدوري المتزامن (منشور واحد كل ساعة)
+# عامل النشر الدوري المجدول (منشور واحد كل ساعة)
 def hourly_publisher_worker():
+    # التأخير لمدة ساعة كاملة قبل بدء حلقة النشر الأولى لكي لا تتعارض مع المنشور الفوري
+    time.sleep(3600)
+    
     while True:
         try:
-            # تحديث قاعدة البيانات بالأخبار الجديدة أولاً
+            # تحديث قاعدة البيانات بالأخبار الجديدة
             fetch_and_store_news()
             
             conn = psycopg2.connect(DATABASE_URL, sslmode='require')
@@ -305,7 +302,7 @@ def hourly_publisher_worker():
         except Exception as e:
             logging.error(f"Error in scheduled publisher worker: {e}")
             
-        # الانتظار لمدة ساعة كاملة (3600 ثانية)
+        # الانتظار لمدة ساعة كاملة (3600 ثانية) قبل النشر التالي
         time.sleep(3600)
 
 def start_background_tasks():
@@ -313,8 +310,10 @@ def start_background_tasks():
     # جلب مبدئي للبيانات عند بدء التشغيل
     fetch_and_store_news()
     
+    # تفعيل الدالة الفورية (سترسل منشوراً واحداً فوراً بعد 10 ثوانٍ)
     threading.Thread(target=send_immediate_sample_posts, daemon=True).start()
-    # تشغيل عامل النشر الذي يعمل كل ساعة
+    
+    # تفعيل دالة النشر المجدول (سترسل المنشور التالي بعد ساعة بالضبط من التشغيل)
     threading.Thread(target=hourly_publisher_worker, daemon=True).start()
 
 start_background_tasks()
