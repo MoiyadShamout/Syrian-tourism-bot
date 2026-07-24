@@ -53,23 +53,6 @@ def init_db():
         cur.execute("ALTER TABLE posted_news ADD COLUMN IF NOT EXISTS source TEXT DEFAULT '';")
         cur.execute("ALTER TABLE posted_news ADD COLUMN IF NOT EXISTS pub_date TEXT DEFAULT '';")
         
-        # حقن عينة ملف PDF تجريبي فورياً للتأكد من وصول الملفات للتلغرام مباشرة
-        cur.execute("SELECT id FROM posted_news WHERE news_url = %s", ("https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf",))
-        if not cur.fetchone():
-            cur.execute(
-                "INSERT INTO posted_news (news_url, title, full_text, media_url, source, pub_date, status) VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                (
-                    "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf",
-                    "تعميم إداري برقم 45 الصادر عن وزارة السياحة حول المعايير التنظيمية",
-                    "يحتوي هذا الملف الرسمي على تفاصيل الاشتراطات والمعايير التنظيمية الصادرة عن وزارة السياحة السورية للمنشآت والشركات السياحية.",
-                    "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf",
-                    "mots",
-                    datetime.now().strftime("%Y/%m/%d %I:%M %p"),
-                    "pending"
-                )
-            )
-            conn.commit()
-
         conn.commit()
         cur.close()
         conn.close()
@@ -122,7 +105,6 @@ def send_to_telegram(title, full_text, link, media_url, pub_date="", source=""):
         session = get_robust_session()
         sent_successfully = False
         
-        # إرسال ملف الـ PDF مباشرة كـ Document ليتم تنزيله من المنشور
         if is_pdf:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
             payload = {
@@ -133,8 +115,6 @@ def send_to_telegram(title, full_text, link, media_url, pub_date="", source=""):
             response = session.post(url, json=payload, timeout=30)
             if response.status_code == 200:
                 sent_successfully = True
-            else:
-                logging.warning(f"Failed to send PDF document: {response.text}")
 
         if not sent_successfully:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -153,29 +133,73 @@ def send_to_telegram(title, full_text, link, media_url, pub_date="", source=""):
         return False
 
 def fetch_mots_pdfs():
+    """زحف تلقائي شامل لكافة أقسام وصفحات موقع وزارة السياحة لاستخراج أي ملفات PDF جديدة"""
     session = get_robust_session()
     headers = {'User-Agent': 'Mozilla/5.0'}
     base_url = "https://mots.gov.sy/"
+    
+    visited_pages = set()
+    pages_to_visit = [base_url]
+    
     try:
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
         cur = conn.cursor()
-        response = session.get(base_url, headers=headers, timeout=20, verify=False)
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
-            for l in soup.find_all('a'):
-                href = l.get('href')
-                title = l.get_text(strip=True)
-                if href and '.pdf' in href.lower() and len(title) > 5:
-                    pdf_link = href if href.startswith('http') else base_url + href.lstrip('/')
-                    pub_date = datetime.now().strftime("%Y/%m/%d %I:%M %p")
-                    
-                    cur.execute("SELECT id FROM posted_news WHERE news_url = %s", (pdf_link,))
-                    if not cur.fetchone():
-                        cur.execute(
-                            "INSERT INTO posted_news (news_url, title, full_text, media_url, source, pub_date, status) VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                            (pdf_link, title, f"ملف تعميم أو قرار صادر عن وزارة السياحة بعنوان: {title}", pdf_link, 'mots', pub_date, 'pending')
-                        )
-                        conn.commit()
+        
+        # الخطوة الأولى: جمع الروابط الداخلية للأقسام والصفحات من الموقع بشكل عام
+        resp = session.get(base_url, headers=headers, timeout=20, verify=False)
+        if resp.status_code == 200:
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            for l in soup.find_all('a', href=True):
+                href = l['href']
+                full_link = href if href.startswith('http') else base_url.rstrip('/') + '/' + href.lstrip('/')
+                
+                # التأكد من أن الرابط يتبع لنطاق الوزارة ولا يشير لملف مكرر أو خارجي
+                if "mots.gov.sy" in full_link and full_link not in visited_pages:
+                    if '.pdf' in full_link.lower():
+                        # معالجة مباشرة إذا وجد ملف PDF في الصفحة الرئيسية
+                        title = l.get_text(strip=True)
+                        clean_title = title if len(title) > 5 else "وثيقة رسمية صادرة عن وزارة السياحة السورية"
+                        pub_date = datetime.now().strftime("%Y/%m/%d %I:%M %p")
+                        
+                        cur.execute("SELECT id FROM posted_news WHERE news_url = %s", (full_link,))
+                        if not cur.fetchone():
+                            cur.execute(
+                                "INSERT INTO posted_news (news_url, title, full_text, media_url, source, pub_date, status) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                                (full_link, clean_title, f"ملف تعميم أو قرار رسمي صادر عن وزارة السياحة بعنوان: {clean_title}", full_link, 'mots', pub_date, 'pending')
+                            )
+                            conn.commit()
+                    elif '/page/' in full_link or 'invest' in full_link or 'guide' in full_link:
+                        if full_link not in pages_to_visit:
+                            pages_to_visit.append(full_link)
+
+        # الخطوة الثانية: تصفح كل الأقسام والصفحات الفرعية المكتشفة والبحث عن ملفات الـ PDF بداخلها
+        for page_url in pages_to_visit[:30]: # تحديد سقف بعدد الصفحات لضمان سرعة التنفيذ
+            if page_url in visited_pages:
+                continue
+            visited_pages.add(page_url)
+            
+            try:
+                sub_resp = session.get(page_url, headers=headers, timeout=15, verify=False)
+                if sub_resp.status_code == 200:
+                    sub_soup = BeautifulSoup(sub_resp.text, 'html.parser')
+                    for l in sub_soup.find_all('a', href=True):
+                        href = l['href']
+                        title = l.get_text(strip=True)
+                        if '.pdf' in href.lower():
+                            pdf_link = href if href.startswith('http') else base_url.rstrip('/') + '/' + href.lstrip('/')
+                            pub_date = datetime.now().strftime("%Y/%m/%d %I:%M %p")
+                            clean_title = title if len(title) > 5 else "وثيقة رسمية صادرة عن وزارة السياحة السورية"
+                            
+                            cur.execute("SELECT id FROM posted_news WHERE news_url = %s", (pdf_link,))
+                            if not cur.fetchone():
+                                cur.execute(
+                                    "INSERT INTO posted_news (news_url, title, full_text, media_url, source, pub_date, status) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                                    (pdf_link, clean_title, f"ملف تعميم أو قرار رسمي صادر عن وزارة السياحة بعنوان: {clean_title}", pdf_link, 'mots', pub_date, 'pending')
+                                )
+                                conn.commit()
+            except Exception as sub_e:
+                logging.warning(f"Skipping page {page_url} due to error: {sub_e}")
+                
         cur.close()
         conn.close()
     except Exception as e:
